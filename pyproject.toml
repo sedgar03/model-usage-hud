@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "model-usage-hud"
+version = "0.1.0"
+description = "Unified terminal HUD for Claude Code, OpenAI Codex, and Gemini usage"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Steven Edgar" }]
+dependencies = []
+
+[project.scripts]
+usage-hud = "usage_hud:main"
+
+[tool.setuptools]
+py-modules = ["usage_hud"]
