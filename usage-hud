@@ -5,4 +5,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PYTHONPATH="${ROOT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
 # Default to your preferred mode; pass extra flags to override behavior.
-exec python3 "${ROOT_DIR}/usage_hud.py" --mini --force "$@"
+exec python3 "${ROOT_DIR}/usage_hud.py" \
+  --mini \
+  --force \
+  --always-on-top \
+  --always-on-top-frameless \
+  --always-on-top-font-size 7.5 \
+  --always-on-top-geometry 320x130+40+40 \
+  "$@"

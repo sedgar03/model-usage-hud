@@ -80,6 +80,7 @@ def supports_color() -> bool:
 
 
 ANSI = Ansi(supports_color())
+BAR_STYLE = "legacy"
 
 
 def _default_lock_path() -> Path:
@@ -213,7 +214,7 @@ def pace_style(delta: int) -> str:
     if delta >= 6:
         return "yellow"
     if delta <= -15:
-        return "bold_green"
+        return "green"
     if delta <= -6:
         return "green"
     return "cyan"
@@ -222,8 +223,12 @@ def pace_style(delta: int) -> str:
 def pct_bar(pct: int, width: int = 16) -> str:
     pct = max(0, min(pct, 100))
     filled = int(round((pct / 100.0) * width))
-    fill = "▓" * filled
-    empty = "░" * (width - filled)
+    if BAR_STYLE == "solid":
+        fill = "█" * filled
+        empty = "█" * (width - filled)
+    else:
+        fill = "▓" * filled
+        empty = "░" * (width - filled)
     return ANSI.style(fill, usage_style(pct)) + ANSI.style(empty, "dim")
 
 
@@ -232,14 +237,38 @@ def build_pace_bar(actual_pct: int, expected_pct: int, width: int = 24) -> str:
     expected_units = int(round((max(0, min(expected_pct, 100)) / 100.0) * width))
     marker_idx = max(0, min(width - 1, expected_units - 1 if expected_units > 0 else 0))
 
+    if BAR_STYLE == "solid":
+        pieces: list[str] = []
+        for i in range(width):
+            pos = i + 1
+            cell_style = "dim"
+            if pos <= min(actual_units, expected_units):
+                cell_style = "cyan"
+            elif actual_units > expected_units and expected_units < pos <= actual_units:
+                cell_style = "red"
+            elif expected_units > actual_units and actual_units < pos <= expected_units:
+                cell_style = "green"
+            elif pos <= actual_units:
+                cell_style = "cyan"
+
+            if i == marker_idx:
+                marker_style = "red" if actual_units > expected_units else "green"
+                if abs(actual_units - expected_units) <= 1:
+                    marker_style = "white"
+                pieces.append(ANSI.style("│", marker_style))
+                continue
+
+            pieces.append(ANSI.style("█", cell_style))
+        return "".join(pieces)
+
     pieces: list[str] = []
     for i in range(width):
         pos = i + 1
         if i == marker_idx:
-            marker_style = "bold_red" if actual_units > expected_units else "bold_green"
+            marker_style = "red" if actual_units > expected_units else "green"
             if abs(actual_units - expected_units) <= 1:
-                marker_style = "bold_white"
-            pieces.append(ANSI.style("┊", marker_style))
+                marker_style = "white"
+            pieces.append(ANSI.style("│", marker_style))
             continue
 
         if pos <= min(actual_units, expected_units):
@@ -265,23 +294,143 @@ def status(pct: int, warn: int, critical: int) -> str:
 
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+ANSI_CODE_RE = re.compile(r"\x1b\[([0-9;]*)m")
+
+ANSI_TK_TAG_BY_CODE = {
+    "1": "ansi_bold",
+    "2": "ansi_dim",
+    "31": "ansi_red",
+    "32": "ansi_green",
+    "33": "ansi_yellow",
+    "36": "ansi_cyan",
+    "37": "ansi_white",
+    "38;5;130": "ansi_brown",
+    "1;31": "ansi_bold_red",
+    "1;32": "ansi_bold_green",
+    "1;37": "ansi_bold_white",
+}
 
 
 def provider_badge_lines(provider: str) -> tuple[str, str]:
     if provider == "claude":
-        top = ANSI.style("/CC\\", "brown")
-        bottom = ANSI.style("\\CC/", "brown")
+        top = ANSI.style("▀▄▄▄▀", "brown")
+        bottom = ANSI.style("█▀█▀█", "brown")
     elif provider == "codex":
-        top = ANSI.style("/OA\\", "white")
-        bottom = ANSI.style("\\OA/", "white")
+        top = ANSI.style("▄▀▀▀▄", "white")
+        bottom = ANSI.style("▀▄█▄▀", "white")
     else:
-        top = ANSI.style("/GM\\", "cyan")
-        bottom = ANSI.style("\\GM/", "cyan")
+        top = ANSI.style("▀█▀█▀", "cyan")
+        bottom = ANSI.style("▄█▄█▄", "cyan")
 
     return f"{top} ", f"{bottom} "
 
 def visible_len(text: str) -> int:
     return len(ANSI_ESCAPE_RE.sub("", text))
+
+
+def insert_ansi_text_tk(widget: Any, text: str, font_size: int, default_fg: str) -> None:
+    base_font = ("Menlo", font_size)
+    bold_font = ("Menlo", font_size, "bold")
+
+    widget.tag_configure("ansi_default", foreground=default_fg, font=base_font)
+    widget.tag_configure("ansi_dim", foreground="#8b949e", font=base_font)
+    widget.tag_configure("ansi_bold", foreground=default_fg, font=bold_font)
+    widget.tag_configure("ansi_red", foreground="#d94848", font=base_font)
+    widget.tag_configure("ansi_green", foreground="#8ce99a", font=base_font)
+    widget.tag_configure("ansi_yellow", foreground="#ffd43b", font=base_font)
+    widget.tag_configure("ansi_cyan", foreground="#1c7ed6", font=base_font)
+    widget.tag_configure("ansi_white", foreground="#f8f9fa", font=base_font)
+    widget.tag_configure("ansi_brown", foreground="#d9a066", font=base_font)
+    widget.tag_configure("ansi_bold_red", foreground="#e03131", font=bold_font)
+    widget.tag_configure("ansi_bold_green", foreground="#8ce99a", font=bold_font)
+    widget.tag_configure("ansi_bold_white", foreground="#ffffff", font=bold_font)
+
+    current_tag = "ansi_default"
+    start = 0
+    for match in ANSI_CODE_RE.finditer(text):
+        segment = text[start : match.start()]
+        if segment:
+            widget.insert("end", segment, current_tag)
+        code = match.group(1) or "0"
+        if code == "0":
+            current_tag = "ansi_default"
+        else:
+            current_tag = ANSI_TK_TAG_BY_CODE.get(code, "ansi_default")
+        start = match.end()
+
+    tail = text[start:]
+    if tail:
+        widget.insert("end", tail, current_tag)
+
+
+def resolve_tk_font_size(root: Any, requested_size: float) -> int:
+    # Tk font sizes are integer points; emulate fractional requests with tk scaling.
+    target = float(requested_size)
+    if target <= 0:
+        return 1
+
+    rounded = max(1, int(round(target)))
+    if abs(target - rounded) < 1e-9:
+        return rounded
+
+    try:
+        root.tk.call("tk", "scaling", target / float(rounded))
+    except Exception:  # noqa: BLE001
+        pass
+    return rounded
+
+
+def enable_frameless_controls(root: Any, drag_widget: Any) -> None:
+    drag_origin: dict[str, int] = {"x": 0, "y": 0}
+
+    def on_press(event: Any) -> None:
+        drag_origin["x"] = int(event.x_root)
+        drag_origin["y"] = int(event.y_root)
+
+    def on_drag(event: Any) -> None:
+        dx = int(event.x_root) - drag_origin["x"]
+        dy = int(event.y_root) - drag_origin["y"]
+        x = int(root.winfo_x()) + dx
+        y = int(root.winfo_y()) + dy
+        root.geometry(f"+{x}+{y}")
+        drag_origin["x"] = int(event.x_root)
+        drag_origin["y"] = int(event.y_root)
+
+    def on_close(_: Any = None) -> str:
+        root.destroy()
+        return "break"
+
+    drag_widget.bind("<ButtonPress-1>", on_press)
+    drag_widget.bind("<B1-Motion>", on_drag)
+    root.bind("<Escape>", on_close)
+    root.bind("<Command-w>", on_close)
+    root.bind("q", on_close)
+
+
+def apply_frameless_style(root: Any) -> None:
+    # Tk on macOS can require multiple calls (before and after mapping) to reliably
+    # remove the window chrome.
+    try:
+        root.overrideredirect(True)
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        root.tk.call(
+            "::tk::unsupported::MacWindowStyle",
+            "style",
+            root._w,
+            "help",
+            "none",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        root.update_idletasks()
+        root.overrideredirect(True)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def pid_is_running(pid: int) -> bool:
@@ -909,8 +1058,206 @@ def render_mini(
     return "\n".join(lines)
 
 
+def fetch_all_snapshots(
+    codex_sessions_dir: Path,
+    gemini_tmp_dir: Path,
+    gemini_minute_limit_requests: int,
+    gemini_day_limit_requests: int,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, str, str, str]:
+    claude_snapshot: dict[str, Any] | None = None
+    codex_snapshot: dict[str, Any] | None = None
+    gemini_snapshot: dict[str, Any] | None = None
+    claude_status = "Initializing"
+    codex_status = "Initializing"
+    gemini_status = "Initializing"
+
+    try:
+        claude_snapshot = fetch_claude_snapshot()
+        claude_status = "Live usage"
+    except urllib.error.HTTPError as exc:
+        claude_status = f"HTTP {exc.code} from Claude usage API"
+    except urllib.error.URLError:
+        claude_status = "Network error reaching Claude usage API"
+    except Exception as exc:  # noqa: BLE001
+        claude_status = str(exc)
+
+    try:
+        codex_snapshot = fetch_codex_snapshot(codex_sessions_dir.expanduser())
+        codex_status = "Local usage"
+    except Exception as exc:  # noqa: BLE001
+        codex_status = str(exc)
+
+    try:
+        gemini_snapshot = fetch_gemini_snapshot(
+            gemini_tmp_dir.expanduser(),
+            gemini_minute_limit_requests,
+            gemini_day_limit_requests,
+        )
+        gemini_status = "Local usage"
+    except Exception as exc:  # noqa: BLE001
+        gemini_status = str(exc)
+
+    return (
+        claude_snapshot,
+        codex_snapshot,
+        gemini_snapshot,
+        claude_status,
+        codex_status,
+        gemini_status,
+    )
+
+
+def render_output(
+    mini: bool,
+    all_limits: bool,
+    warn: int,
+    critical: int,
+    claude_snapshot: dict[str, Any] | None,
+    codex_snapshot: dict[str, Any] | None,
+    gemini_snapshot: dict[str, Any] | None,
+    claude_status: str,
+    codex_status: str,
+    gemini_status: str,
+) -> str:
+    if mini:
+        return render_mini(
+            claude_snapshot=claude_snapshot,
+            codex_snapshot=codex_snapshot,
+            gemini_snapshot=gemini_snapshot,
+            claude_status=claude_status,
+            codex_status=codex_status,
+            gemini_status=gemini_status,
+            warn=warn,
+            critical=critical,
+            all_limits=all_limits,
+        )
+
+    return render_full(
+        claude_snapshot=claude_snapshot,
+        codex_snapshot=codex_snapshot,
+        gemini_snapshot=gemini_snapshot,
+        claude_status=claude_status,
+        codex_status=codex_status,
+        gemini_status=gemini_status,
+        warn=warn,
+        critical=critical,
+        all_limits=all_limits,
+    )
+
+
+def run_topmost_window(args: argparse.Namespace) -> int:
+    try:
+        import tkinter as tk
+    except ModuleNotFoundError as exc:
+        if getattr(exc, "name", "") == "_tkinter":
+            py_tag = f"{sys.version_info.major}.{sys.version_info.minor}"
+            print(
+                (
+                    "Could not initialize topmost HUD window: missing Tk bindings for this Python.\n"
+                    f"Install them with: brew install python-tk@{py_tag}\n"
+                    "Then retry in a new shell."
+                ),
+                file=sys.stderr,
+            )
+            return 1
+        print(f"Could not initialize topmost HUD window: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"Could not initialize topmost HUD window: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        bg_color = "#111315"
+        fg_color = "#e6edf3"
+        if args.no_color:
+            bg_color = "#ffffff"
+            fg_color = "#111111"
+
+        root = tk.Tk()
+        root.title("usage-hud (always-on-top)")
+        root.configure(background=bg_color)
+        root.attributes("-topmost", True)
+        if args.always_on_top_frameless:
+            apply_frameless_style(root)
+        root.geometry(args.always_on_top_geometry)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Could not create topmost HUD window: {exc}", file=sys.stderr)
+        return 1
+
+    tk_font_size = resolve_tk_font_size(root, args.always_on_top_font_size)
+
+    text = tk.Text(
+        root,
+        wrap="none",
+        background=bg_color,
+        foreground=fg_color,
+        insertbackground=fg_color,
+        borderwidth=0,
+        highlightthickness=0,
+        padx=12,
+        pady=10,
+        font=("Menlo", tk_font_size),
+    )
+    text.pack(fill="both", expand=True)
+    text.configure(state="disabled")
+    if args.always_on_top_frameless:
+        enable_frameless_controls(root=root, drag_widget=text)
+
+    interval_ms = max(1, int(args.interval * 1000))
+
+    def refresh() -> None:
+        (
+            claude_snapshot,
+            codex_snapshot,
+            gemini_snapshot,
+            claude_status,
+            codex_status,
+            gemini_status,
+        ) = fetch_all_snapshots(
+            codex_sessions_dir=args.codex_sessions_dir,
+            gemini_tmp_dir=args.gemini_tmp_dir,
+            gemini_minute_limit_requests=args.gemini_minute_limit_requests,
+            gemini_day_limit_requests=args.gemini_day_limit_requests,
+        )
+
+        output = render_output(
+            mini=args.mini,
+            all_limits=args.all_limits,
+            warn=args.warn_threshold,
+            critical=args.critical_threshold,
+            claude_snapshot=claude_snapshot,
+            codex_snapshot=codex_snapshot,
+            gemini_snapshot=gemini_snapshot,
+            claude_status=claude_status,
+            codex_status=codex_status,
+            gemini_status=gemini_status,
+        )
+
+        text.configure(state="normal")
+        text.delete("1.0", "end")
+        if args.no_color:
+            text.insert("1.0", ANSI_ESCAPE_RE.sub("", output))
+        else:
+            insert_ansi_text_tk(
+                widget=text,
+                text=output,
+                font_size=tk_font_size,
+                default_fg=fg_color,
+            )
+        text.configure(state="disabled")
+
+        root.after(interval_ms, refresh)
+
+    refresh()
+    root.mainloop()
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Monitor Claude Code, Codex, and Gemini usage in one HUD.")
+    mac_default_topmost = sys.platform == "darwin"
+    mac_default_topmost_label = "enabled on macOS, disabled elsewhere"
+    mac_default_frameless_label = "enabled on macOS, disabled elsewhere"
     parser.add_argument(
         "--codex-sessions-dir",
         type=Path,
@@ -966,6 +1313,55 @@ def parse_args() -> argparse.Namespace:
         help="Show all Codex limit buckets (default: show primary codex bucket only)",
     )
     parser.add_argument(
+        "--bar-style",
+        choices=["auto", "legacy", "solid"],
+        default="auto",
+        help="Bar rendering style (default: auto; solid in topmost mode, legacy in terminal mode)",
+    )
+    parser.add_argument(
+        "--always-on-top",
+        dest="always_on_top",
+        action="store_true",
+        default=mac_default_topmost,
+        help=(
+            "Render HUD in a small always-on-top window "
+            f"(default: {mac_default_topmost_label})"
+        ),
+    )
+    parser.add_argument(
+        "--no-always-on-top",
+        dest="always_on_top",
+        action="store_false",
+        help="Disable always-on-top window and render in the terminal",
+    )
+    parser.add_argument(
+        "--always-on-top-font-size",
+        type=float,
+        default=7.5,
+        help="Font size for --always-on-top window (default: 7.5)",
+    )
+    parser.add_argument(
+        "--always-on-top-geometry",
+        default="320x130+40+40",
+        help="Initial geometry for --always-on-top, e.g. 320x130+40+40 (default: 320x130+40+40)",
+    )
+    parser.add_argument(
+        "--always-on-top-frameless",
+        dest="always_on_top_frameless",
+        action="store_true",
+        default=mac_default_topmost,
+        help=(
+            "Hide title bar in --always-on-top mode "
+            f"(default: {mac_default_frameless_label}; drag to move, Esc/Cmd+W/q to close)"
+        ),
+    )
+    parser.add_argument(
+        "--always-on-top-framed",
+        dest="always_on_top_frameless",
+        action="store_false",
+        help="Show title bar in --always-on-top mode",
+    )
+    parser.add_argument(
         "--gemini-tmp-dir",
         type=Path,
         default=Path.home() / ".gemini" / "tmp",
@@ -994,8 +1390,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     global ANSI
+    global BAR_STYLE
 
     args = parse_args()
+
+    if args.bar_style == "auto":
+        BAR_STYLE = "solid" if args.always_on_top else "legacy"
+    else:
+        BAR_STYLE = args.bar_style
 
     if args.no_color:
         ANSI = Ansi(False)
@@ -1012,49 +1414,53 @@ def main() -> int:
     if args.gemini_day_limit_requests < 0:
         print("--gemini-day-limit-requests must be >= 0", file=sys.stderr)
         return 2
+    if args.always_on_top and sys.platform != "darwin":
+        print("--always-on-top is currently supported on macOS only", file=sys.stderr)
+        return 2
+    if args.always_on_top and args.json:
+        print("--always-on-top cannot be combined with --json", file=sys.stderr)
+        return 2
+    if args.always_on_top and args.once:
+        print("--always-on-top cannot be combined with --once", file=sys.stderr)
+        return 2
+    if args.always_on_top_font_size <= 0:
+        print("--always-on-top-font-size must be > 0", file=sys.stderr)
+        return 2
+    if not isinstance(args.always_on_top_geometry, str) or not args.always_on_top_geometry.strip():
+        print("--always-on-top-geometry must be a non-empty geometry string", file=sys.stderr)
+        return 2
 
     run_once = args.once or args.json
     use_alt_screen = (
-        not run_once and sys.stdout.isatty() and not args.no_alt_screen and not args.json
+        not run_once
+        and sys.stdout.isatty()
+        and not args.no_alt_screen
+        and not args.json
+        and not args.always_on_top
     )
-
-    claude_snapshot: dict[str, Any] | None = None
-    codex_snapshot: dict[str, Any] | None = None
-    gemini_snapshot: dict[str, Any] | None = None
-    claude_status = "Initializing"
-    codex_status = "Initializing"
-    gemini_status = "Initializing"
 
     try:
         with single_instance_lock(force=args.force):
+            if args.always_on_top:
+                return run_topmost_window(args)
+
             if use_alt_screen:
                 enter_alt_screen()
 
             while True:
-                try:
-                    claude_snapshot = fetch_claude_snapshot()
-                    claude_status = "Live usage"
-                except urllib.error.HTTPError as exc:
-                    claude_status = f"HTTP {exc.code} from Claude usage API"
-                except urllib.error.URLError:
-                    claude_status = "Network error reaching Claude usage API"
-                except Exception as exc:  # noqa: BLE001
-                    claude_status = str(exc)
-
-                try:
-                    codex_snapshot = fetch_codex_snapshot(args.codex_sessions_dir.expanduser())
-                    codex_status = "Local usage"
-                except Exception as exc:  # noqa: BLE001
-                    codex_status = str(exc)
-                try:
-                    gemini_snapshot = fetch_gemini_snapshot(
-                        args.gemini_tmp_dir.expanduser(),
-                        args.gemini_minute_limit_requests,
-                        args.gemini_day_limit_requests,
-                    )
-                    gemini_status = "Local usage"
-                except Exception as exc:  # noqa: BLE001
-                    gemini_status = str(exc)
+                (
+                    claude_snapshot,
+                    codex_snapshot,
+                    gemini_snapshot,
+                    claude_status,
+                    codex_status,
+                    gemini_status,
+                ) = fetch_all_snapshots(
+                    codex_sessions_dir=args.codex_sessions_dir,
+                    gemini_tmp_dir=args.gemini_tmp_dir,
+                    gemini_minute_limit_requests=args.gemini_minute_limit_requests,
+                    gemini_day_limit_requests=args.gemini_day_limit_requests,
+                )
 
                 if args.json:
                     payload = {
@@ -1076,34 +1482,20 @@ def main() -> int:
                 else:
                     if sys.stdout.isatty():
                         sys.stdout.write("\x1b[2J\x1b[H")
-                    if args.mini:
-                        print(
-                            render_mini(
-                                claude_snapshot=claude_snapshot,
-                                codex_snapshot=codex_snapshot,
-                                gemini_snapshot=gemini_snapshot,
-                                claude_status=claude_status,
-                                codex_status=codex_status,
-                                gemini_status=gemini_status,
-                                warn=args.warn_threshold,
-                                critical=args.critical_threshold,
-                                all_limits=args.all_limits,
-                            )
+                    print(
+                        render_output(
+                            mini=args.mini,
+                            all_limits=args.all_limits,
+                            warn=args.warn_threshold,
+                            critical=args.critical_threshold,
+                            claude_snapshot=claude_snapshot,
+                            codex_snapshot=codex_snapshot,
+                            gemini_snapshot=gemini_snapshot,
+                            claude_status=claude_status,
+                            codex_status=codex_status,
+                            gemini_status=gemini_status,
                         )
-                    else:
-                        print(
-                            render_full(
-                                claude_snapshot=claude_snapshot,
-                                codex_snapshot=codex_snapshot,
-                                gemini_snapshot=gemini_snapshot,
-                                claude_status=claude_status,
-                                codex_status=codex_status,
-                                gemini_status=gemini_status,
-                                warn=args.warn_threshold,
-                                critical=args.critical_threshold,
-                                all_limits=args.all_limits,
-                            )
-                        )
+                    )
                     sys.stdout.flush()
 
                 if run_once:

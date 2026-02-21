@@ -1,3 +1,18 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Virtual envs / Python tooling
+.venv/
+venv/
+.python-version
+.pytest_cache/
+.mypy_cache/
+
+# Local runtime artifacts
+*.log
+.usage-hud/
+
+# Editor / OS metadata
+.vscode/
+.idea/
