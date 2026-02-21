@@ -81,6 +81,7 @@ def supports_color() -> bool:
 
 ANSI = Ansi(supports_color())
 BAR_STYLE = "legacy"
+PROVIDER_ORDER = ("claude", "codex", "gemini")
 
 
 def _default_lock_path() -> Path:
@@ -1016,7 +1017,50 @@ def render_gemini_mini(
     return lines
 
 
+def parse_provider_selection(raw_value: str) -> set[str]:
+    value = str(raw_value or "").strip().lower()
+    if value in {"all", "*"}:
+        return set(PROVIDER_ORDER)
+
+    providers = [part.strip().lower() for part in value.split(",") if part.strip()]
+    if not providers:
+        raise ValueError(
+            "--providers cannot be empty. Use 'all' or a comma-separated list like 'codex,gemini'."
+        )
+
+    invalid = sorted(set(providers) - set(PROVIDER_ORDER))
+    if invalid:
+        valid = ", ".join(PROVIDER_ORDER)
+        bad = ", ".join(invalid)
+        raise ValueError(f"Invalid --providers value: {bad}. Valid values: {valid}, all.")
+
+    return set(providers)
+
+
+def build_provider_sections(
+    selected_providers: set[str],
+    claude_snapshot: dict[str, Any] | None,
+    codex_snapshot: dict[str, Any] | None,
+    gemini_snapshot: dict[str, Any] | None,
+    claude_status: str,
+    codex_status: str,
+    gemini_status: str,
+    warn: int,
+    critical: int,
+    all_limits: bool,
+) -> list[list[str]]:
+    sections: list[list[str]] = []
+    if "claude" in selected_providers:
+        sections.append(render_claude_mini(claude_snapshot, claude_status, warn, critical))
+    if "codex" in selected_providers:
+        sections.append(render_codex_mini(codex_snapshot, codex_status, warn, critical, all_limits))
+    if "gemini" in selected_providers:
+        sections.append(render_gemini_mini(gemini_snapshot, gemini_status, warn, critical))
+    return sections
+
+
 def render_full(
+    selected_providers: set[str],
     claude_snapshot: dict[str, Any] | None,
     codex_snapshot: dict[str, Any] | None,
     gemini_snapshot: dict[str, Any] | None,
@@ -1028,17 +1072,31 @@ def render_full(
     all_limits: bool,
 ) -> str:
     now_local = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-    lines: list[str] = [ANSI.style(f"UNIFIED USAGE HUD  ({now_local})", "bold"), ""]
-    lines.extend(render_claude_mini(claude_snapshot, claude_status, warn, critical))
-    lines.append("")
-    lines.extend(render_codex_mini(codex_snapshot, codex_status, warn, critical, all_limits))
-    lines.append("")
-    lines.extend(render_gemini_mini(gemini_snapshot, gemini_status, warn, critical))
+    lines: list[str] = [ANSI.style(f"UNIFIED USAGE HUD  ({now_local})", "bold")]
+    sections = build_provider_sections(
+        selected_providers=selected_providers,
+        claude_snapshot=claude_snapshot,
+        codex_snapshot=codex_snapshot,
+        gemini_snapshot=gemini_snapshot,
+        claude_status=claude_status,
+        codex_status=codex_status,
+        gemini_status=gemini_status,
+        warn=warn,
+        critical=critical,
+        all_limits=all_limits,
+    )
+    if sections:
+        lines.append("")
+    for idx, section in enumerate(sections):
+        lines.extend(section)
+        if idx < len(sections) - 1:
+            lines.append("")
 
     return "\n".join(lines)
 
 
 def render_mini(
+    selected_providers: set[str],
     claude_snapshot: dict[str, Any] | None,
     codex_snapshot: dict[str, Any] | None,
     gemini_snapshot: dict[str, Any] | None,
@@ -1050,15 +1108,27 @@ def render_mini(
     all_limits: bool,
 ) -> str:
     lines: list[str] = []
-    lines.extend(render_claude_mini(claude_snapshot, claude_status, warn, critical))
-    lines.append("")
-    lines.extend(render_codex_mini(codex_snapshot, codex_status, warn, critical, all_limits))
-    lines.append("")
-    lines.extend(render_gemini_mini(gemini_snapshot, gemini_status, warn, critical))
+    sections = build_provider_sections(
+        selected_providers=selected_providers,
+        claude_snapshot=claude_snapshot,
+        codex_snapshot=codex_snapshot,
+        gemini_snapshot=gemini_snapshot,
+        claude_status=claude_status,
+        codex_status=codex_status,
+        gemini_status=gemini_status,
+        warn=warn,
+        critical=critical,
+        all_limits=all_limits,
+    )
+    for idx, section in enumerate(sections):
+        lines.extend(section)
+        if idx < len(sections) - 1:
+            lines.append("")
     return "\n".join(lines)
 
 
 def fetch_all_snapshots(
+    selected_providers: set[str],
     codex_sessions_dir: Path,
     gemini_tmp_dir: Path,
     gemini_minute_limit_requests: int,
@@ -1067,35 +1137,41 @@ def fetch_all_snapshots(
     claude_snapshot: dict[str, Any] | None = None
     codex_snapshot: dict[str, Any] | None = None
     gemini_snapshot: dict[str, Any] | None = None
-    claude_status = "Initializing"
-    codex_status = "Initializing"
-    gemini_status = "Initializing"
+    claude_status = "Disabled by --providers"
+    codex_status = "Disabled by --providers"
+    gemini_status = "Disabled by --providers"
 
-    try:
-        claude_snapshot = fetch_claude_snapshot()
-        claude_status = "Live usage"
-    except urllib.error.HTTPError as exc:
-        claude_status = f"HTTP {exc.code} from Claude usage API"
-    except urllib.error.URLError:
-        claude_status = "Network error reaching Claude usage API"
-    except Exception as exc:  # noqa: BLE001
-        claude_status = str(exc)
+    if "claude" in selected_providers:
+        claude_status = "Initializing"
+        try:
+            claude_snapshot = fetch_claude_snapshot()
+            claude_status = "Live usage"
+        except urllib.error.HTTPError as exc:
+            claude_status = f"HTTP {exc.code} from Claude usage API"
+        except urllib.error.URLError:
+            claude_status = "Network error reaching Claude usage API"
+        except Exception as exc:  # noqa: BLE001
+            claude_status = str(exc)
 
-    try:
-        codex_snapshot = fetch_codex_snapshot(codex_sessions_dir.expanduser())
-        codex_status = "Local usage"
-    except Exception as exc:  # noqa: BLE001
-        codex_status = str(exc)
+    if "codex" in selected_providers:
+        codex_status = "Initializing"
+        try:
+            codex_snapshot = fetch_codex_snapshot(codex_sessions_dir.expanduser())
+            codex_status = "Local usage"
+        except Exception as exc:  # noqa: BLE001
+            codex_status = str(exc)
 
-    try:
-        gemini_snapshot = fetch_gemini_snapshot(
-            gemini_tmp_dir.expanduser(),
-            gemini_minute_limit_requests,
-            gemini_day_limit_requests,
-        )
-        gemini_status = "Local usage"
-    except Exception as exc:  # noqa: BLE001
-        gemini_status = str(exc)
+    if "gemini" in selected_providers:
+        gemini_status = "Initializing"
+        try:
+            gemini_snapshot = fetch_gemini_snapshot(
+                gemini_tmp_dir.expanduser(),
+                gemini_minute_limit_requests,
+                gemini_day_limit_requests,
+            )
+            gemini_status = "Local usage"
+        except Exception as exc:  # noqa: BLE001
+            gemini_status = str(exc)
 
     return (
         claude_snapshot,
@@ -1108,6 +1184,7 @@ def fetch_all_snapshots(
 
 
 def render_output(
+    selected_providers: set[str],
     mini: bool,
     all_limits: bool,
     warn: int,
@@ -1121,6 +1198,7 @@ def render_output(
 ) -> str:
     if mini:
         return render_mini(
+            selected_providers=selected_providers,
             claude_snapshot=claude_snapshot,
             codex_snapshot=codex_snapshot,
             gemini_snapshot=gemini_snapshot,
@@ -1133,6 +1211,7 @@ def render_output(
         )
 
     return render_full(
+        selected_providers=selected_providers,
         claude_snapshot=claude_snapshot,
         codex_snapshot=codex_snapshot,
         gemini_snapshot=gemini_snapshot,
@@ -1145,7 +1224,7 @@ def render_output(
     )
 
 
-def run_topmost_window(args: argparse.Namespace) -> int:
+def run_topmost_window(args: argparse.Namespace, selected_providers: set[str]) -> int:
     try:
         import tkinter as tk
     except ModuleNotFoundError as exc:
@@ -1214,6 +1293,7 @@ def run_topmost_window(args: argparse.Namespace) -> int:
             codex_status,
             gemini_status,
         ) = fetch_all_snapshots(
+            selected_providers=selected_providers,
             codex_sessions_dir=args.codex_sessions_dir,
             gemini_tmp_dir=args.gemini_tmp_dir,
             gemini_minute_limit_requests=args.gemini_minute_limit_requests,
@@ -1221,6 +1301,7 @@ def run_topmost_window(args: argparse.Namespace) -> int:
         )
 
         output = render_output(
+            selected_providers=selected_providers,
             mini=args.mini,
             all_limits=args.all_limits,
             warn=args.warn_threshold,
@@ -1313,6 +1394,11 @@ def parse_args() -> argparse.Namespace:
         help="Show all Codex limit buckets (default: show primary codex bucket only)",
     )
     parser.add_argument(
+        "--providers",
+        default="all",
+        help="Comma-separated providers to display: claude,codex,gemini or all (default: all)",
+    )
+    parser.add_argument(
         "--bar-style",
         choices=["auto", "legacy", "solid"],
         default="auto",
@@ -1394,6 +1480,12 @@ def main() -> int:
 
     args = parse_args()
 
+    try:
+        selected_providers = parse_provider_selection(args.providers)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
     if args.bar_style == "auto":
         BAR_STYLE = "solid" if args.always_on_top else "legacy"
     else:
@@ -1442,7 +1534,7 @@ def main() -> int:
     try:
         with single_instance_lock(force=args.force):
             if args.always_on_top:
-                return run_topmost_window(args)
+                return run_topmost_window(args, selected_providers)
 
             if use_alt_screen:
                 enter_alt_screen()
@@ -1456,6 +1548,7 @@ def main() -> int:
                     codex_status,
                     gemini_status,
                 ) = fetch_all_snapshots(
+                    selected_providers=selected_providers,
                     codex_sessions_dir=args.codex_sessions_dir,
                     gemini_tmp_dir=args.gemini_tmp_dir,
                     gemini_minute_limit_requests=args.gemini_minute_limit_requests,
@@ -1484,6 +1577,7 @@ def main() -> int:
                         sys.stdout.write("\x1b[2J\x1b[H")
                     print(
                         render_output(
+                            selected_providers=selected_providers,
                             mini=args.mini,
                             all_limits=args.all_limits,
                             warn=args.warn_threshold,

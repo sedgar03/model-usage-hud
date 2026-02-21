@@ -77,6 +77,12 @@ Run topmost in monochrome:
 ./usage-hud --no-color
 ```
 
+Show only one provider (example: Codex only):
+
+```bash
+./usage-hud --providers codex
+```
+
 JSON output:
 
 ```bash
@@ -131,6 +137,7 @@ Notable options:
 - `--interval 15` refresh every 15 seconds
 - `--no-alt-screen` keep scrollback
 - `--all-limits` show all Codex limit buckets
+- `--providers codex,gemini` show only selected providers (`claude`, `codex`, `gemini`; default: all)
 - `--always-on-top` force topmost HUD window
 - `--no-always-on-top` force terminal rendering
 - `--always-on-top-font-size 7` smaller/larger text size in topmost mode (default: 7.5)
