@@ -5,93 +5,11 @@ Unified terminal HUD for monitoring usage across:
 - OpenAI Codex local rate-limit snapshots from `~/.codex/sessions/*.jsonl`
 - Gemini local request + token usage from `~/.gemini/tmp/*/chats/session-*.json`
 
-## Features
-
-- Single command: `usage-hud`
-- Minimal two-line provider badges on the left (no text labels):
-  - Claude: /CC\ and \CC/ in brown
-  - OpenAI: /OA\ and \OA/ in white
-  - Gemini: /GM\ and \GM/ in cyan
-- Claude-HUD style pace bars with expected-usage marker
-- Cleaner mini rows: delta + target in parentheses (for example `-36 (43%)`)
-- Defaults to your preferred mode: `--mini --force`
-- Default Codex view shows only the main `codex` bucket
-- Optional `--all-limits` to also show model-specific buckets (like `CODEX_BENGALFOX`)
-- macOS default: always-on-top frameless PiP-style window (font 7.5, geometry `320x130+40+40`)
-- Gemini mini bars use configurable request limits (defaults: `120/min` and `1500/day`)
-- JSON output mode for scripting
-- Uses local Codex logs (no OpenAI API key required)
+![HUD screenshot](docs/screenshot.png)
 
 ## Quick Start
 
-```bash
-cd ~/Code/model-usage-hud
-./usage-hud
-```
-
-Run one snapshot:
-
-```bash
-./usage-hud --once --no-always-on-top
-```
-
-Show all Codex buckets:
-
-```bash
-./usage-hud --once --all-limits --no-always-on-top
-```
-
-Run in always-on-top mode explicitly:
-
-```bash
-./usage-hud --always-on-top
-```
-
-Run in terminal mode (opt out of topmost default):
-
-```bash
-./usage-hud --no-always-on-top
-```
-
-Run topmost with title bar:
-
-```bash
-./usage-hud --always-on-top-framed
-```
-
-Run topmost with smaller text:
-
-```bash
-./usage-hud --always-on-top-font-size 7
-```
-
-Run topmost without macOS title bar (frameless):
-
-```bash
-./usage-hud --always-on-top-geometry 320x130+40+40
-```
-
-Run topmost in monochrome:
-
-```bash
-./usage-hud --no-color
-```
-
-Show only one provider (example: Codex only):
-
-```bash
-./usage-hud --providers codex
-```
-
-JSON output:
-
-```bash
-./usage-hud --json --once
-```
-
-## Install as Global Command
-
-From the repo root:
+Install as a global command from the repo root:
 
 ```bash
 python3 -m pip install -e .
@@ -103,12 +21,57 @@ Then run anywhere:
 usage-hud
 ```
 
-## Documentation
+Or run directly without installing:
 
-- Setup and provider configuration: `docs/SETUP.md`
-- Privacy and safe commits: `docs/PRIVACY.md`
+```bash
+cd ~/Code/model-usage-hud
+./usage-hud
+```
 
-## Reading the Mini Bars
+See `docs/SETUP.md` for provider configuration and `docs/PRIVACY.md` for safe-commit guidance.
+
+## Features
+
+- Single command: `usage-hud` — defaults to `--mini --force`
+- Compact two-line provider badges (Claude, OpenAI, Gemini)
+- Pace bars with expected-usage marker showing delta and target
+- macOS default: always-on-top frameless PiP-style window
+- Filter providers with `--providers claude,codex,gemini`
+- Codex uses local session logs (no OpenAI API key required)
+- Gemini mini bars with configurable request limits (defaults: `120/min`, `1500/day`)
+- JSON output mode for scripting
+
+## Usage Examples
+
+Run one snapshot in the terminal:
+
+```bash
+usage-hud --once --no-always-on-top
+```
+
+Show all Codex buckets:
+
+```bash
+usage-hud --once --all-limits --no-always-on-top
+```
+
+Always-on-top with title bar / smaller text / custom geometry:
+
+```bash
+usage-hud --always-on-top-framed
+usage-hud --always-on-top-font-size 7
+usage-hud --always-on-top-geometry 320x130+40+40
+```
+
+Single provider, monochrome, or JSON:
+
+```bash
+usage-hud --providers codex
+usage-hud --no-color
+usage-hud --json --once
+```
+
+## Reading the Display
 
 Each window line shows:
 - `%` actual utilization
@@ -125,7 +88,7 @@ Interpretation:
 - green delta: spending slower than steady pace
 - marker near actual fill: on pace
 
-## Options
+## All Options
 
 ```bash
 usage-hud --help
@@ -151,7 +114,7 @@ Notable options:
 - `--gemini-day-limit-requests 1500`
 - `--no-color`
 
-## Notes
+## Notes & Troubleshooting
 
 - Claude usage is fetched from Anthropic OAuth usage API using your macOS Keychain `Claude Code-credentials` item.
 - If Claude credentials are missing, the HUD still shows Codex data.
