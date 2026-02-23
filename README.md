@@ -42,6 +42,7 @@ See `docs/SETUP.md` for provider configuration and `docs/PRIVACY.md` for safe-co
 - Filter providers with `--providers claude,codex,gemini`
 - Codex uses local session logs (no OpenAI API key required)
 - Gemini mini bars with configurable request limits (defaults: `120/min`, `1500/day`)
+- Speedometer mode (`--speedometer`): burn-rate (%/h) and ETA-to-throttle on each window line
 - JSON output mode for scripting
 
 ## Usage Examples
@@ -66,6 +67,13 @@ usage-hud --always-on-top-font-size 7
 usage-hud --always-on-top-geometry 320x130+40+40
 ```
 
+Speedometer (burn-rate + ETA):
+
+```bash
+usage-hud --speedometer
+usage-hud --speedometer --interval 10   # faster sampling
+```
+
 Single provider, monochrome, or JSON:
 
 ```bash
@@ -81,6 +89,7 @@ Each window line shows:
 - bar with a vertical marker `│` for expected utilization at this point in the window
 - signed delta (`+/-`) versus expected pace
 - target utilization in parentheses (for example `(43%)`)
+- with `--speedometer`: burn rate and ETA suffix (e.g. `⏱ +3%/h ~46h`)
 
 Window labels:
 - Claude/Codex: `S` = short window, `W` = week window
@@ -115,6 +124,7 @@ Notable options:
 - `--gemini-tmp-dir /path/to/.gemini/tmp`
 - `--gemini-minute-limit-requests 120`
 - `--gemini-day-limit-requests 1500`
+- `--speedometer` show burn-rate (%/h) and ETA-to-throttle on each window line (auto-widens topmost window to 400px)
 - `--no-color`
 
 ## Notes & Troubleshooting

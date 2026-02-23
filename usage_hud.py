@@ -11,6 +11,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -92,6 +93,81 @@ def _default_lock_path() -> Path:
 
 
 LOCK_PATH = _default_lock_path()
+
+
+# ---------------------------------------------------------------------------
+# Burn-rate tracker (speedometer)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _Sample:
+    timestamp: float
+    pct: int
+
+
+class BurnTracker:
+    def __init__(self, maxlen: int = 15):
+        self._maxlen = maxlen
+        self._buffers: dict[tuple[str, str], deque[_Sample]] = {}
+
+    def record(self, key: tuple[str, str], pct: int) -> None:
+        buf = self._buffers.get(key)
+        if buf and buf[-1].pct - pct > 5:
+            buf.clear()
+        if buf is None:
+            buf = deque(maxlen=self._maxlen)
+            self._buffers[key] = buf
+        buf.append(_Sample(time.time(), pct))
+
+    def burn_rate(self, key: tuple[str, str]) -> float | None:
+        buf = self._buffers.get(key)
+        if not buf or len(buf) < 2:
+            return None
+        oldest, newest = buf[0], buf[-1]
+        dt_hours = (newest.timestamp - oldest.timestamp) / 3600
+        if dt_hours <= 0:
+            return None
+        rate = (newest.pct - oldest.pct) / dt_hours
+        return rate if rate > 0 else None
+
+    def eta_hours(self, key: tuple[str, str]) -> float | None:
+        rate = self.burn_rate(key)
+        if rate is None:
+            return None
+        buf = self._buffers[key]
+        remaining = 100 - buf[-1].pct
+        if remaining <= 0:
+            return 0.0
+        return remaining / rate
+
+
+BURN_TRACKER = BurnTracker(maxlen=15)
+SPEEDOMETER_ENABLED = False
+
+
+def _format_eta(hours: float) -> str:
+    if hours < 1:
+        minutes = max(1, int(hours * 60))
+        return f"~{minutes}m"
+    if hours <= 48:
+        if hours == int(hours):
+            return f"~{int(hours)}h"
+        return f"~{hours:.1f}h"
+    days = hours / 24
+    if days == int(days):
+        return f"~{int(days)}d"
+    return f"~{days:.1f}d"
+
+
+def format_speedometer(key: tuple[str, str] | None) -> str:
+    if key is None or not SPEEDOMETER_ENABLED:
+        return ""
+    rate = BURN_TRACKER.burn_rate(key)
+    if rate is None:
+        return ""
+    eta = BURN_TRACKER.eta_hours(key)
+    eta_str = f" {_format_eta(eta)}" if eta is not None else ""
+    return ANSI.style(f" \u23F1 +{rate:.0f}%/h{eta_str}", "dim")
 
 
 def clamp_pct(value: Any) -> int:
@@ -796,20 +872,22 @@ def render_window_compact(
     expected: int | None,
     warn: int,
     critical: int,
+    burn_key: tuple[str, str] | None = None,
 ) -> str:
+    speedo = format_speedometer(burn_key)
     if pct is None:
         return f"{ANSI.style(label, 'bold')} --% {ANSI.style('no data', 'yellow')}"
 
     pct_text = ANSI.style(f"{pct:>3}%", "bold")
     if expected is None:
-        return f"{ANSI.style(label, 'bold')} {pct_text} {pct_bar(pct, 14)}"
+        return f"{ANSI.style(label, 'bold')} {pct_text} {pct_bar(pct, 14)}{speedo}"
 
     delta = pct - expected
     delta_text = ANSI.style(f"{delta:+d}", pace_style(delta))
     target_text = ANSI.style(f"({expected}%)", "dim")
     return (
         f"{ANSI.style(label, 'bold')} {pct_text} {build_pace_bar(pct, expected, 16)} "
-        f"{delta_text} {target_text}"
+        f"{delta_text} {target_text}{speedo}"
     )
 
 
@@ -837,12 +915,20 @@ def render_claude_mini(
         seven.get("resets_at"), timedelta(days=7), now_local
     )
 
+    key_s = ("claude", "S")
+    key_w = ("claude", "W")
+    if five_pct is not None:
+        BURN_TRACKER.record(key_s, five_pct)
+    if seven_pct is not None:
+        BURN_TRACKER.record(key_w, seven_pct)
+
     row_s = render_window_compact(
         "S",
         five_pct,
         five_expected,
         warn,
         critical,
+        burn_key=key_s,
     )
     row_w = render_window_compact(
         "W",
@@ -850,6 +936,7 @@ def render_claude_mini(
         seven_expected,
         warn,
         critical,
+        burn_key=key_w,
     )
 
     lines = [f"{first_prefix}{row_s}", f"{second_prefix}{row_w}"]
@@ -919,12 +1006,20 @@ def render_codex_mini(
         s_reset = int(secondary.get("resets_at") or 0) if isinstance(secondary, dict) else 0
         s_expected = expected_pct_from_epoch_reset(s_reset, s_window, now_epoch)
 
+        key_s = ("codex", f"{limit_id}/S")
+        key_w = ("codex", f"{limit_id}/W")
+        if p_pct is not None:
+            BURN_TRACKER.record(key_s, p_pct)
+        if s_pct is not None:
+            BURN_TRACKER.record(key_w, s_pct)
+
         row_s = render_window_compact(
             "S",
             p_pct,
             p_expected,
             warn,
             critical,
+            burn_key=key_s,
         )
         row_w = render_window_compact(
             "W",
@@ -932,6 +1027,7 @@ def render_codex_mini(
             s_expected,
             warn,
             critical,
+            burn_key=key_w,
         )
 
         if all_limits:
@@ -982,6 +1078,13 @@ def render_gemini_mini(
         else None
     )
 
+    key_m = ("gemini", "M")
+    key_d = ("gemini", "D")
+    if minute_pct is not None:
+        BURN_TRACKER.record(key_m, minute_pct)
+    if day_pct is not None:
+        BURN_TRACKER.record(key_d, day_pct)
+
     now_local = datetime.now().astimezone()
     minute_expected = (
         expected_pct_from_iso_reset(minute.get("resets_at"), timedelta(minutes=1), now_local)
@@ -1000,6 +1103,7 @@ def render_gemini_mini(
         minute_expected,
         warn,
         critical,
+        burn_key=key_m,
     )
     row_w = render_window_compact(
         "D",
@@ -1007,6 +1111,7 @@ def render_gemini_mini(
         day_expected,
         warn,
         critical,
+        burn_key=key_d,
     )
 
     lines = [f"{first_prefix}{row_s}", f"{second_prefix}{row_w}"]
@@ -1348,8 +1453,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--interval",
         type=float,
-        default=30.0,
-        help="Refresh interval in seconds (default: 30)",
+        default=60.0,
+        help="Refresh interval in seconds (default: 60)",
     )
     parser.add_argument(
         "--once",
@@ -1467,6 +1572,11 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--speedometer",
+        action="store_true",
+        help="Show burn-rate and ETA-to-throttle suffix on each window line",
+    )
+    parser.add_argument(
         "--no-color",
         action="store_true",
         help="Disable ANSI color output",
@@ -1477,6 +1587,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     global ANSI
     global BAR_STYLE
+    global SPEEDOMETER_ENABLED
 
     args = parse_args()
 
@@ -1493,6 +1604,9 @@ def main() -> int:
 
     if args.no_color:
         ANSI = Ansi(False)
+
+    if args.speedometer:
+        SPEEDOMETER_ENABLED = True
 
     if args.interval <= 0:
         print("--interval must be > 0", file=sys.stderr)
@@ -1515,6 +1629,9 @@ def main() -> int:
     if args.always_on_top and args.once:
         print("--always-on-top cannot be combined with --once", file=sys.stderr)
         return 2
+    if args.speedometer and args.always_on_top_geometry == "320x130+40+40":
+        args.always_on_top_geometry = "400x130+40+40"
+
     if args.always_on_top_font_size <= 0:
         print("--always-on-top-font-size must be > 0", file=sys.stderr)
         return 2
