@@ -83,6 +83,8 @@ def supports_color() -> bool:
 ANSI = Ansi(supports_color())
 BAR_STYLE = "legacy"
 PROVIDER_ORDER = ("claude", "codex", "gemini")
+DEFAULT_TOPMOST_GEOMETRY = "320x130+40+40"
+SINGLE_PROVIDER_TOPMOST_WIDTH_SCALE = 0.65
 
 
 def _default_lock_path() -> Path:
@@ -388,7 +390,10 @@ ANSI_TK_TAG_BY_CODE = {
 }
 
 
-def provider_badge_lines(provider: str) -> tuple[str, str]:
+def provider_badge_lines(provider: str, show_badge: bool = True) -> tuple[str, str]:
+    if not show_badge:
+        return "", ""
+
     if provider == "claude":
         top = ANSI.style("▀▄▄▄▀", "brown")
         bottom = ANSI.style("█▀█▀█", "brown")
@@ -455,6 +460,39 @@ def resolve_tk_font_size(root: Any, requested_size: float) -> int:
     except Exception:  # noqa: BLE001
         pass
     return rounded
+
+
+def estimate_topmost_rows(selected_providers: set[str], mini: bool) -> int:
+    provider_count = max(1, len(selected_providers))
+    rows = (provider_count * 2) + max(0, provider_count - 1)
+    if not mini:
+        rows += 2
+    return rows
+
+
+def estimate_topmost_height(selected_providers: set[str], mini: bool, font_size: float) -> int:
+    rows = estimate_topmost_rows(selected_providers=selected_providers, mini=mini)
+    scale = max(1.0, float(font_size)) / 7.5
+    base_px = 34.0 * scale
+    row_px = 12.0 * scale
+    return max(52, int(round(base_px + (rows * row_px))))
+
+
+def build_default_topmost_geometry(
+    selected_providers: set[str],
+    mini: bool,
+    font_size: float,
+    speedometer: bool,
+) -> str:
+    width = 400 if speedometer else 320
+    if len(selected_providers) == 1:
+        width = max(200, int(round(width * SINGLE_PROVIDER_TOPMOST_WIDTH_SCALE)))
+    height = estimate_topmost_height(
+        selected_providers=selected_providers,
+        mini=mini,
+        font_size=font_size,
+    )
+    return f"{width}x{height}+40+40"
 
 
 def enable_frameless_controls(root: Any, drag_widget: Any) -> None:
@@ -896,8 +934,9 @@ def render_claude_mini(
     status_line: str,
     warn: int,
     critical: int,
+    show_badge: bool = True,
 ) -> list[str]:
-    first_prefix, second_prefix = provider_badge_lines("claude")
+    first_prefix, second_prefix = provider_badge_lines("claude", show_badge=show_badge)
     cont_prefix = " " * visible_len(first_prefix)
 
     if not snapshot:
@@ -977,8 +1016,9 @@ def render_codex_mini(
     warn: int,
     critical: int,
     all_limits: bool,
+    show_badge: bool = True,
 ) -> list[str]:
-    first_prefix, second_prefix = provider_badge_lines("codex")
+    first_prefix, second_prefix = provider_badge_lines("codex", show_badge=show_badge)
     cont_prefix = " " * visible_len(first_prefix)
 
     if not snapshot:
@@ -1057,8 +1097,9 @@ def render_gemini_mini(
     status_line: str,
     warn: int,
     critical: int,
+    show_badge: bool = True,
 ) -> list[str]:
-    first_prefix, second_prefix = provider_badge_lines("gemini")
+    first_prefix, second_prefix = provider_badge_lines("gemini", show_badge=show_badge)
     cont_prefix = " " * visible_len(first_prefix)
 
     if not snapshot:
@@ -1153,14 +1194,40 @@ def build_provider_sections(
     warn: int,
     critical: int,
     all_limits: bool,
+    show_badges: bool,
 ) -> list[list[str]]:
     sections: list[list[str]] = []
     if "claude" in selected_providers:
-        sections.append(render_claude_mini(claude_snapshot, claude_status, warn, critical))
+        sections.append(
+            render_claude_mini(
+                claude_snapshot,
+                claude_status,
+                warn,
+                critical,
+                show_badge=show_badges,
+            )
+        )
     if "codex" in selected_providers:
-        sections.append(render_codex_mini(codex_snapshot, codex_status, warn, critical, all_limits))
+        sections.append(
+            render_codex_mini(
+                codex_snapshot,
+                codex_status,
+                warn,
+                critical,
+                all_limits,
+                show_badge=show_badges,
+            )
+        )
     if "gemini" in selected_providers:
-        sections.append(render_gemini_mini(gemini_snapshot, gemini_status, warn, critical))
+        sections.append(
+            render_gemini_mini(
+                gemini_snapshot,
+                gemini_status,
+                warn,
+                critical,
+                show_badge=show_badges,
+            )
+        )
     return sections
 
 
@@ -1178,6 +1245,7 @@ def render_full(
 ) -> str:
     now_local = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     lines: list[str] = [ANSI.style(f"UNIFIED USAGE HUD  ({now_local})", "bold")]
+    show_badges = len(selected_providers) > 1
     sections = build_provider_sections(
         selected_providers=selected_providers,
         claude_snapshot=claude_snapshot,
@@ -1189,6 +1257,7 @@ def render_full(
         warn=warn,
         critical=critical,
         all_limits=all_limits,
+        show_badges=show_badges,
     )
     if sections:
         lines.append("")
@@ -1213,6 +1282,7 @@ def render_mini(
     all_limits: bool,
 ) -> str:
     lines: list[str] = []
+    show_badges = len(selected_providers) > 1
     sections = build_provider_sections(
         selected_providers=selected_providers,
         claude_snapshot=claude_snapshot,
@@ -1224,6 +1294,7 @@ def render_mini(
         warn=warn,
         critical=critical,
         all_limits=all_limits,
+        show_badges=show_badges,
     )
     for idx, section in enumerate(sections):
         lines.extend(section)
@@ -1533,8 +1604,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--always-on-top-geometry",
-        default="320x130+40+40",
-        help="Initial geometry for --always-on-top, e.g. 320x130+40+40 (default: 320x130+40+40)",
+        default=DEFAULT_TOPMOST_GEOMETRY,
+        help=(
+            "Initial geometry for --always-on-top, e.g. 320x130+40+40 "
+            f"(default: {DEFAULT_TOPMOST_GEOMETRY}; size auto-scales for --providers when unchanged)"
+        ),
     )
     parser.add_argument(
         "--always-on-top-frameless",
@@ -1629,8 +1703,13 @@ def main() -> int:
     if args.always_on_top and args.once:
         print("--always-on-top cannot be combined with --once", file=sys.stderr)
         return 2
-    if args.speedometer and args.always_on_top_geometry == "320x130+40+40":
-        args.always_on_top_geometry = "400x130+40+40"
+    if args.always_on_top and args.always_on_top_geometry == DEFAULT_TOPMOST_GEOMETRY:
+        args.always_on_top_geometry = build_default_topmost_geometry(
+            selected_providers=selected_providers,
+            mini=args.mini,
+            font_size=args.always_on_top_font_size,
+            speedometer=args.speedometer,
+        )
 
     if args.always_on_top_font_size <= 0:
         print("--always-on-top-font-size must be > 0", file=sys.stderr)
