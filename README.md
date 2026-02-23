@@ -1,11 +1,14 @@
 # model-usage-hud
 
-Unified terminal HUD for monitoring usage across:
-- Claude Code subscription windows (5h, 7d, 7d-opus)
-- OpenAI Codex local rate-limit snapshots from `~/.codex/sessions/*.jsonl`
-- Gemini local request + token usage from `~/.gemini/tmp/*/chats/session-*.json`
-
 <img src="docs/screenshot.png" alt="HUD screenshot" width="35%">
+
+Unified HUD for monitoring usage and tracking progress toward limits across all of the following models:
+- Claude Code
+- OpenAI Codex
+- Gemini
+
+HUD stays on top of the screen at all times unless explicitly disabled.  Fewer models (e.g. only Claude Code) can be selected as well.
+
 
 ## Quick Start
 
