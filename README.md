@@ -5,7 +5,7 @@ Unified terminal HUD for monitoring usage across:
 - OpenAI Codex local rate-limit snapshots from `~/.codex/sessions/*.jsonl`
 - Gemini local request + token usage from `~/.gemini/tmp/*/chats/session-*.json`
 
-![HUD screenshot](docs/screenshot.png)
+<img src="docs/screenshot.png" alt="HUD screenshot" width="35%">
 
 ## Quick Start
 
