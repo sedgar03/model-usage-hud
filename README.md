@@ -1,6 +1,9 @@
 # model-usage-hud
 
-<img src="docs/screenshot.png" alt="HUD screenshot" width="35%">
+<p align="left">
+  <img src="docs/screenshot.png" alt="All-provider HUD screenshot" width="35%">
+  <img src="image.png" alt="Single-provider HUD auto-scaled example" width="35%">
+</p>
 
 Unified HUD for monitoring usage and tracking progress toward limits across all of the following models:
 - Claude Code
@@ -8,6 +11,7 @@ Unified HUD for monitoring usage and tracking progress toward limits across all 
 - Gemini
 
 HUD stays on top of the screen at all times unless explicitly disabled.  Fewer models (e.g. only Claude Code) can be selected as well.
+When running a single provider (for example `--providers codex`), the topmost HUD automatically scales down to fit the reduced line count (shown above).
 
 
 ## Quick Start
@@ -40,6 +44,7 @@ See `docs/SETUP.md` for provider configuration and `docs/PRIVACY.md` for safe-co
 - Pace bars with expected-usage marker showing delta and target
 - macOS default: always-on-top frameless PiP-style window
 - Filter providers with `--providers claude,codex,gemini`
+- Topmost window height auto-scales for provider count, including single-provider mode
 - Codex uses local session logs (no OpenAI API key required)
 - Gemini mini bars with configurable request limits (defaults: `120/min`, `1500/day`)
 - Speedometer mode (`--speedometer`): burn-rate (%/h) and ETA-to-throttle on each window line
@@ -116,7 +121,7 @@ Notable options:
 - `--always-on-top` force topmost HUD window
 - `--no-always-on-top` force terminal rendering
 - `--always-on-top-font-size 7` smaller/larger text size in topmost mode (default: 7.5)
-- `--always-on-top-geometry 320x130+40+40` set initial topmost window size/position (default: `320x130+40+40`)
+- `--always-on-top-geometry 320x130+40+40` set initial topmost window size/position (default: `320x130+40+40`; auto-height scales with `--providers` when unchanged)
 - `--always-on-top-frameless` hide title bar in topmost mode (default on macOS)
 - `--always-on-top-framed` show title bar in topmost mode
 - `--bar-style solid|legacy|auto` choose bar glyph style (default `auto`: solid in topmost, legacy in terminal)
@@ -124,7 +129,7 @@ Notable options:
 - `--gemini-tmp-dir /path/to/.gemini/tmp`
 - `--gemini-minute-limit-requests 120`
 - `--gemini-day-limit-requests 1500`
-- `--speedometer` show burn-rate (%/h) and ETA-to-throttle on each window line (auto-widens topmost window to 400px)
+- `--speedometer` show burn-rate (%/h) and ETA-to-throttle on each window line (auto-widens topmost window to 400px when using default geometry)
 - `--no-color`
 
 ## Notes & Troubleshooting
