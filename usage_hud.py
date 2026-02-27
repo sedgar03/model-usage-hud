@@ -145,6 +145,7 @@ class BurnTracker:
 
 BURN_TRACKER = BurnTracker(maxlen=15)
 SPEEDOMETER_ENABLED = False
+DECIMALS = False
 
 
 def _format_eta(hours: float) -> str:
@@ -172,12 +173,28 @@ def format_speedometer(key: tuple[str, str] | None) -> str:
     return ANSI.style(f" \u23F1 +{rate:.0f}%/h{eta_str}", "dim")
 
 
-def clamp_pct(value: Any) -> int:
+def clamp_pct(value: Any) -> int | float:
     try:
-        pct = int(round(float(value)))
+        v = float(value)
     except (TypeError, ValueError):
-        return 0
+        return 0.0 if DECIMALS else 0
+    if DECIMALS:
+        pct = round(v, 1)
+        return max(0.0, min(pct, 100.0))
+    pct = int(round(v))
     return max(0, min(pct, 100))
+
+
+def fmt_pct(value: int | float) -> str:
+    if DECIMALS:
+        return f"{value:>5.1f}%"
+    return f"{value:>3}%"
+
+
+def fmt_delta(value: int | float) -> str:
+    if DECIMALS:
+        return f"{value:+.1f}"
+    return f"{value:+d}"
 
 
 def parse_iso(ts: str | None) -> datetime | None:
@@ -260,7 +277,7 @@ def format_time_left(seconds_left: int | None) -> str:
     return "in " + " ".join(pieces)
 
 
-def expected_pct_from_iso_reset(resets_at: str | None, window: timedelta, now_local: datetime) -> int | None:
+def expected_pct_from_iso_reset(resets_at: str | None, window: timedelta, now_local: datetime) -> int | float | None:
     reset_dt = parse_iso(resets_at)
     if reset_dt is None:
         return None
@@ -270,7 +287,7 @@ def expected_pct_from_iso_reset(resets_at: str | None, window: timedelta, now_lo
     return clamp_pct(elapsed * 100.0)
 
 
-def expected_pct_from_epoch_reset(resets_at: int, window_minutes: int, now_epoch: float) -> int | None:
+def expected_pct_from_epoch_reset(resets_at: int, window_minutes: int, now_epoch: float) -> int | float | None:
     if resets_at <= 0 or window_minutes <= 0:
         return None
     window_seconds = window_minutes * 60
@@ -485,6 +502,8 @@ def build_default_topmost_geometry(
     speedometer: bool,
 ) -> str:
     width = 400 if speedometer else 320
+    if DECIMALS:
+        width = int(round(width * 1.05))
     if len(selected_providers) == 1:
         width = max(200, int(round(width * SINGLE_PROVIDER_TOPMOST_WIDTH_SCALE)))
     height = estimate_topmost_height(
@@ -806,11 +825,11 @@ def _start_of_local_minute(now_local: datetime) -> datetime:
     return now_local.replace(second=0, microsecond=0)
 
 
-def _utilization_from_count(used_count: int, limit_count: int) -> int | None:
+def _utilization_from_count(used_count: int, limit_count: int) -> int | float | None:
     if limit_count <= 0:
         return None
     pct = (used_count / float(limit_count)) * 100.0
-    if used_count > 0 and pct < 1.0:
+    if not DECIMALS and used_count > 0 and pct < 1.0:
         return 1
     return clamp_pct(pct)
 
@@ -906,8 +925,8 @@ def fetch_gemini_snapshot(
 
 def render_window_compact(
     label: str,
-    pct: int | None,
-    expected: int | None,
+    pct: int | float | None,
+    expected: int | float | None,
     warn: int,
     critical: int,
     burn_key: tuple[str, str] | None = None,
@@ -916,13 +935,13 @@ def render_window_compact(
     if pct is None:
         return f"{ANSI.style(label, 'bold')} --% {ANSI.style('no data', 'yellow')}"
 
-    pct_text = ANSI.style(f"{pct:>3}%", "bold")
+    pct_text = ANSI.style(fmt_pct(pct), "white")
     if expected is None:
         return f"{ANSI.style(label, 'bold')} {pct_text} {pct_bar(pct, 14)}{speedo}"
 
     delta = pct - expected
-    delta_text = ANSI.style(f"{delta:+d}", pace_style(delta))
-    target_text = ANSI.style(f"({expected}%)", "dim")
+    delta_text = ANSI.style(fmt_delta(delta), pace_style(delta))
+    target_text = ANSI.style(f"({fmt_pct(expected).strip()})", "dim")
     return (
         f"{ANSI.style(label, 'bold')} {pct_text} {build_pace_bar(pct, expected, 16)} "
         f"{delta_text} {target_text}{speedo}"
@@ -982,7 +1001,7 @@ def render_claude_mini(
 
     if isinstance(opus, dict) and opus.get("utilization") is not None:
         opus_pct = clamp_pct(opus.get("utilization"))
-        lines.append(f"{cont_prefix}{ANSI.style('O', 'dim')} {opus_pct:>3}%")
+        lines.append(f"{cont_prefix}{ANSI.style('O', 'dim')} {fmt_pct(opus_pct)}")
 
     if status_line != "Live usage":
         lines.append(f"{cont_prefix}{ANSI.style(status_line, 'yellow')}")
@@ -1524,8 +1543,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--interval",
         type=float,
-        default=60.0,
-        help="Refresh interval in seconds (default: 60)",
+        default=None,
+        help="Refresh interval in seconds (default: 30 with --decimals, 60 otherwise)",
     )
     parser.add_argument(
         "--once",
@@ -1651,6 +1670,11 @@ def parse_args() -> argparse.Namespace:
         help="Show burn-rate and ETA-to-throttle suffix on each window line",
     )
     parser.add_argument(
+        "--decimals",
+        action="store_true",
+        help="Show one decimal place on percentages (e.g. 12.2%% instead of 12%%)",
+    )
+    parser.add_argument(
         "--no-color",
         action="store_true",
         help="Disable ANSI color output",
@@ -1662,6 +1686,7 @@ def main() -> int:
     global ANSI
     global BAR_STYLE
     global SPEEDOMETER_ENABLED
+    global DECIMALS
 
     args = parse_args()
 
@@ -1681,6 +1706,12 @@ def main() -> int:
 
     if args.speedometer:
         SPEEDOMETER_ENABLED = True
+
+    if args.decimals:
+        DECIMALS = True
+
+    if args.interval is None:
+        args.interval = 30.0 if args.decimals else 60.0
 
     if args.interval <= 0:
         print("--interval must be > 0", file=sys.stderr)
