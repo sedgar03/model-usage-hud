@@ -46,7 +46,7 @@ See `docs/SETUP.md` for provider configuration and `docs/PRIVACY.md` for safe-co
 - Filter providers with `--providers claude,codex,gemini`
 - Topmost window height auto-scales for provider count, including single-provider mode
 - Codex uses local session logs (no OpenAI API key required)
-- Gemini mini bars with configurable request limits (defaults: `120/min`, `1500/day`)
+- Gemini mini bars with configurable request limits (defaults: `50 P/24h`, `1500 N/24h`)
 - Speedometer mode (`--speedometer`): burn-rate (%/h) and ETA-to-throttle on each window line
 - JSON output mode for scripting
 
@@ -98,7 +98,7 @@ Each window line shows:
 
 Window labels:
 - Claude/Codex: `S` = short window, `W` = week window
-- Gemini: `M` = minute request window, `D` = daily request window
+- Gemini: `P` = Pro models 24-hour rolling window, `N` = Non-Pro models 24-hour rolling window
 
 Interpretation:
 - red delta: spending faster than steady pace
@@ -127,8 +127,8 @@ Notable options:
 - `--bar-style solid|legacy|auto` choose bar glyph style (default `auto`: solid in topmost, legacy in terminal)
 - `--codex-sessions-dir /path/to/sessions`
 - `--gemini-tmp-dir /path/to/.gemini/tmp`
-- `--gemini-minute-limit-requests 120`
-- `--gemini-day-limit-requests 1500`
+- `--gemini-pro-limit-requests 50`
+- `--gemini-non-pro-limit-requests 1500`
 - `--speedometer` show burn-rate (%/h) and ETA-to-throttle on each window line (auto-widens topmost window to 400px when using default geometry)
 - `--no-color`
 
@@ -136,9 +136,10 @@ Notable options:
 
 - Claude usage is fetched from Anthropic OAuth usage API using your macOS Keychain `Claude Code-credentials` item.
 - If Claude credentials are missing, the HUD still shows Codex data.
-- Gemini request usage is estimated from local Gemini CLI session logs by counting Gemini responses as requests and comparing against request limits.
-- Gemini token totals are still included in `--json` output for reference (`minute.used_tokens`, `day.used_tokens`, and per-model totals).
-- Gemini defaults (`120/min`, `1500/day`) match Google AI Pro quotas as of February 21, 2026; override with `--gemini-minute-limit-requests` and `--gemini-day-limit-requests` if your account limits differ.
+- Gemini request usage is estimated from local Gemini CLI session logs by counting Gemini responses as requests and comparing against request limits (Pro vs Non-Pro/Flash models).
+- Gemini token totals are still included in `--json` output for reference (`pro.used_tokens`, `non_pro.used_tokens`, and per-model totals).
+- Gemini defaults (`50/24h P`, `1500/24h N`) match common quotas as of February 27, 2026; override with `--gemini-pro-limit-requests` and `--gemini-non-pro-limit-requests` if your account limits differ.
+- Gemini resets are based on a 24-hour rolling window (a request is "returned" to your quota exactly 24 hours after it was made).
 - Lock file default is `~/.usage-hud/usage-hud.lock`; if unavailable, it falls back to `/tmp/usage-hud.lock`.
 - On macOS, topmost mode is enabled by default; use `--no-always-on-top` for terminal mode.
 - `--always-on-top` is only supported on macOS and cannot be combined with `--json` or `--once`.

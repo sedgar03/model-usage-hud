@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 from contextlib import contextmanager
@@ -18,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import re
 from typing import Any
+
 
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -696,6 +698,39 @@ def fetch_claude_snapshot() -> dict[str, Any]:
     }
 
 
+def format_claude_http_error(exc: urllib.error.HTTPError) -> str:
+    message = f"HTTP {exc.code} from Claude usage API"
+    details: list[str] = []
+    headers = exc.headers or {}
+    retry_after = headers.get("retry-after")
+    request_id = headers.get("request-id") or headers.get("x-request-id")
+    if retry_after:
+        details.append(f"retry-after={retry_after}")
+    if request_id:
+        details.append(f"request-id={request_id}")
+
+    try:
+        body = exc.read()
+    except Exception:  # noqa: BLE001
+        body = b""
+
+    if body:
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            err = payload.get("error")
+            if isinstance(err, dict):
+                text = err.get("message")
+                if isinstance(text, str) and text.strip():
+                    details.append(text.strip())
+
+    if details:
+        return f"{message} ({'; '.join(details)})"
+    return message
+
+
 def parse_codex_window(raw_window: Any) -> CodexRateWindow | None:
     if not isinstance(raw_window, dict):
         return None
@@ -834,22 +869,184 @@ def _utilization_from_count(used_count: int, limit_count: int) -> int | float | 
     return clamp_pct(pct)
 
 
-def fetch_gemini_snapshot(
+# ---------------------------------------------------------------------------
+# Gemini OAuth + API helpers
+# ---------------------------------------------------------------------------
+
+GEMINI_OAUTH_CLIENT_ID = os.environ.get("GEMINI_OAUTH_CLIENT_ID", "")
+GEMINI_OAUTH_CLIENT_SECRET = os.environ.get("GEMINI_OAUTH_CLIENT_SECRET", "")
+GEMINI_CREDS_PATH = Path.home() / ".gemini" / "oauth_creds.json"
+GEMINI_API_BASE = "https://cloudcode-pa.googleapis.com/v1internal"
+
+# Cache the project ID across refreshes (it doesn't change within a session).
+_gemini_project_id: str | None = None
+
+
+def _gemini_read_creds() -> dict[str, Any] | None:
+    try:
+        with GEMINI_CREDS_PATH.open() as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _gemini_refresh_token(creds: dict[str, Any]) -> dict[str, Any] | None:
+    refresh_tok = creds.get("refresh_token")
+    if not refresh_tok:
+        return None
+    body = urllib.parse.urlencode({
+        "client_id": GEMINI_OAUTH_CLIENT_ID,
+        "client_secret": GEMINI_OAUTH_CLIENT_SECRET,
+        "refresh_token": refresh_tok,
+        "grant_type": "refresh_token",
+    }).encode()
+    req = urllib.request.Request(
+        "https://oauth2.googleapis.com/token",
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    resp = urllib.request.urlopen(req, timeout=10)
+    new_tokens = json.loads(resp.read())
+    creds["access_token"] = new_tokens["access_token"]
+    creds["expiry_date"] = int(time.time() * 1000) + new_tokens.get("expires_in", 3600) * 1000
+    if "refresh_token" in new_tokens:
+        creds["refresh_token"] = new_tokens["refresh_token"]
+    try:
+        with GEMINI_CREDS_PATH.open("w") as f:
+            json.dump(creds, f)
+    except OSError:
+        pass
+    return creds
+
+
+def _gemini_get_token() -> str | None:
+    creds = _gemini_read_creds()
+    if creds is None:
+        return None
+    expiry_ms = creds.get("expiry_date", 0)
+    if time.time() * 1000 >= expiry_ms - 60_000:
+        creds = _gemini_refresh_token(creds)
+        if creds is None:
+            return None
+    return creds.get("access_token")
+
+
+def _gemini_api_post(endpoint: str, token: str, body: dict[str, Any]) -> dict[str, Any]:
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(
+        f"{GEMINI_API_BASE}:{endpoint}",
+        data=data,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    resp = urllib.request.urlopen(req, timeout=15)
+    return json.loads(resp.read())
+
+
+def _gemini_get_project_id(token: str) -> str:
+    global _gemini_project_id
+    if _gemini_project_id:
+        return _gemini_project_id
+    resp = _gemini_api_post("loadCodeAssist", token, {
+        "metadata": {
+            "ideType": "IDE_UNSPECIFIED",
+            "platform": "PLATFORM_UNSPECIFIED",
+            "pluginType": "GEMINI",
+        },
+    })
+    pid = resp.get("cloudaicompanionProject", "")
+    if not pid:
+        raise ValueError("No cloudaicompanionProject in loadCodeAssist response")
+    _gemini_project_id = pid
+    return pid
+
+
+def fetch_gemini_api_snapshot() -> dict[str, Any]:
+    """Fetch real-time quota from the Gemini Cloud Code API."""
+    token = _gemini_get_token()
+    if token is None:
+        raise ValueError("No Gemini OAuth credentials found")
+
+    project_id = _gemini_get_project_id(token)
+    resp = _gemini_api_post("retrieveUserQuota", token, {"project": project_id})
+
+    buckets = resp.get("buckets") or []
+
+    # Aggregate by tier: pro vs non-pro (flash/lite).
+    # Each tier may have multiple model entries with the same fraction; pick
+    # the worst (lowest remainingFraction = most used) and latest reset.
+    pro_fraction: float | None = None
+    pro_reset: str | None = None
+    non_pro_fraction: float | None = None
+    non_pro_reset: str | None = None
+    models: dict[str, float] = {}
+
+    for bucket in buckets:
+        model_id = bucket.get("modelId", "")
+        if not model_id or model_id.endswith("_vertex"):
+            continue
+        frac = bucket.get("remainingFraction")
+        reset_time = bucket.get("resetTime")
+        if frac is None:
+            continue
+
+        models[model_id] = round((1 - frac) * 100, 2)
+
+        is_pro = "pro" in model_id.lower()
+        if is_pro:
+            if pro_fraction is None or frac < pro_fraction:
+                pro_fraction = frac
+            if reset_time and (pro_reset is None or reset_time > pro_reset):
+                pro_reset = reset_time
+        else:
+            if non_pro_fraction is None or frac < non_pro_fraction:
+                non_pro_fraction = frac
+            if reset_time and (non_pro_reset is None or reset_time > non_pro_reset):
+                non_pro_reset = reset_time
+
+    now_iso = datetime.now().astimezone().isoformat()
+
+    def _util_from_frac(frac: float | None) -> int | float | None:
+        if frac is None:
+            return None
+        pct = (1.0 - frac) * 100.0
+        if not DECIMALS and pct > 0 and pct < 1.0:
+            return 1
+        return clamp_pct(pct)
+
+    return {
+        "pro": {
+            "utilization": _util_from_frac(pro_fraction),
+            "resets_at": pro_reset,
+        },
+        "non_pro": {
+            "utilization": _util_from_frac(non_pro_fraction),
+            "resets_at": non_pro_reset,
+        },
+        "models": {model: pct for model, pct in sorted(models.items())},
+        "source": "api",
+        "updated_at": now_iso,
+    }
+
+
+def fetch_gemini_local_snapshot(
     gemini_tmp_dir: Path,
-    minute_limit_requests: int,
-    day_limit_requests: int,
+    pro_limit_requests: int,
+    non_pro_limit_requests: int,
 ) -> dict[str, Any]:
+    """Fallback: estimate usage from local session files."""
     now_local = datetime.now().astimezone()
-    minute_start = _start_of_local_minute(now_local)
-    day_start = _start_of_local_day(now_local)
-    minute_reset = minute_start + timedelta(minutes=1)
-    day_reset = day_start + timedelta(days=1)
+    window_start = now_local - timedelta(days=1)
 
     sessions_scanned = 0
-    minute_requests = 0
-    day_requests = 0
-    minute_tokens = 0
-    day_tokens = 0
+    pro_request_times: list[datetime] = []
+    non_pro_request_times: list[datetime] = []
+    pro_tokens = 0
+    non_pro_tokens = 0
     model_totals: dict[str, int] = {}
 
     if gemini_tmp_dir.exists():
@@ -892,35 +1089,58 @@ def fetch_gemini_snapshot(
                     model = "unknown"
                 model_totals[model] = model_totals.get(model, 0) + total_tokens
 
-                if ts >= minute_start:
-                    minute_requests += 1
-                    minute_tokens += total_tokens
-                if ts >= day_start:
-                    day_tokens += total_tokens
-                    day_requests += 1
+                if ts >= window_start:
+                    is_pro = "pro" in model.lower()
+                    if is_pro:
+                        pro_request_times.append(ts)
+                        pro_tokens += total_tokens
+                    else:
+                        non_pro_request_times.append(ts)
+                        non_pro_tokens += total_tokens
+
+    pro_requests = len(pro_request_times)
+    non_pro_requests = len(non_pro_request_times)
+
+    pro_reset = min(pro_request_times).astimezone() + timedelta(days=1) if pro_request_times else now_local + timedelta(days=1)
+    non_pro_reset = min(non_pro_request_times).astimezone() + timedelta(days=1) if non_pro_request_times else now_local + timedelta(days=1)
 
     return {
-        "minute": {
-            "used_requests": minute_requests,
-            "limit_requests": max(0, minute_limit_requests),
-            "utilization": _utilization_from_count(minute_requests, minute_limit_requests),
-            "used_tokens": minute_tokens,
-            "resets_at": minute_reset.isoformat(),
+        "pro": {
+            "used_requests": pro_requests,
+            "limit_requests": max(0, pro_limit_requests),
+            "utilization": _utilization_from_count(pro_requests, pro_limit_requests),
+            "used_tokens": pro_tokens,
+            "resets_at": pro_reset.isoformat(),
         },
-        "day": {
-            "used_tokens": day_tokens,
-            "used_requests": day_requests,
-            "limit_requests": max(0, day_limit_requests),
-            "utilization": _utilization_from_count(day_requests, day_limit_requests),
-            "resets_at": day_reset.isoformat(),
+        "non_pro": {
+            "used_requests": non_pro_requests,
+            "limit_requests": max(0, non_pro_limit_requests),
+            "utilization": _utilization_from_count(non_pro_requests, non_pro_limit_requests),
+            "used_tokens": non_pro_tokens,
+            "resets_at": non_pro_reset.isoformat(),
         },
         "models": {
             model: model_totals[model]
             for model in sorted(model_totals)
         },
+        "source": "local",
         "sessions_scanned": sessions_scanned,
         "updated_at": now_local.isoformat(),
     }
+
+
+def fetch_gemini_snapshot(
+    gemini_tmp_dir: Path,
+    pro_limit_requests: int,
+    non_pro_limit_requests: int,
+) -> dict[str, Any]:
+    """Try the real API first; fall back to local session-file scanning."""
+    try:
+        return fetch_gemini_api_snapshot()
+    except Exception:  # noqa: BLE001
+        return fetch_gemini_local_snapshot(
+            gemini_tmp_dir, pro_limit_requests, non_pro_limit_requests,
+        )
 
 
 def render_window_compact(
@@ -1124,57 +1344,57 @@ def render_gemini_mini(
     if not snapshot:
         return [f"{first_prefix}{ANSI.style(status_line, 'yellow')}"]
 
-    minute = snapshot.get("minute") if isinstance(snapshot.get("minute"), dict) else {}
-    day = snapshot.get("day") if isinstance(snapshot.get("day"), dict) else {}
+    pro = snapshot.get("pro") if isinstance(snapshot.get("pro"), dict) else {}
+    non_pro = snapshot.get("non_pro") if isinstance(snapshot.get("non_pro"), dict) else {}
 
-    minute_pct = (
-        clamp_pct(minute.get("utilization"))
-        if minute and minute.get("utilization") is not None
+    pro_pct = (
+        clamp_pct(pro.get("utilization"))
+        if pro and pro.get("utilization") is not None
         else None
     )
-    day_pct = (
-        clamp_pct(day.get("utilization"))
-        if day and day.get("utilization") is not None
+    non_pro_pct = (
+        clamp_pct(non_pro.get("utilization"))
+        if non_pro and non_pro.get("utilization") is not None
         else None
     )
 
-    key_m = ("gemini", "M")
-    key_d = ("gemini", "D")
-    if minute_pct is not None:
-        BURN_TRACKER.record(key_m, minute_pct)
-    if day_pct is not None:
-        BURN_TRACKER.record(key_d, day_pct)
+    key_p = ("gemini", "P")
+    key_n = ("gemini", "N")
+    if pro_pct is not None:
+        BURN_TRACKER.record(key_p, pro_pct)
+    if non_pro_pct is not None:
+        BURN_TRACKER.record(key_n, non_pro_pct)
 
     now_local = datetime.now().astimezone()
-    minute_expected = (
-        expected_pct_from_iso_reset(minute.get("resets_at"), timedelta(minutes=1), now_local)
-        if minute_pct is not None
+    pro_expected = (
+        expected_pct_from_iso_reset(pro.get("resets_at"), timedelta(days=1), now_local)
+        if pro_pct is not None
         else None
     )
-    day_expected = (
-        expected_pct_from_iso_reset(day.get("resets_at"), timedelta(days=1), now_local)
-        if day_pct is not None
+    non_pro_expected = (
+        expected_pct_from_iso_reset(non_pro.get("resets_at"), timedelta(days=1), now_local)
+        if non_pro_pct is not None
         else None
     )
 
-    row_s = render_window_compact(
-        "M",
-        minute_pct,
-        minute_expected,
+    row_pro = render_window_compact(
+        "P",
+        pro_pct,
+        pro_expected,
         warn,
         critical,
-        burn_key=key_m,
+        burn_key=key_p,
     )
-    row_w = render_window_compact(
-        "D",
-        day_pct,
-        day_expected,
+    row_non = render_window_compact(
+        "N",
+        non_pro_pct,
+        non_pro_expected,
         warn,
         critical,
-        burn_key=key_d,
+        burn_key=key_n,
     )
 
-    lines = [f"{first_prefix}{row_s}", f"{second_prefix}{row_w}"]
+    lines = [f"{first_prefix}{row_pro}", f"{second_prefix}{row_non}"]
 
     if status_line != "Local usage":
         lines.append(f"{cont_prefix}{ANSI.style(status_line, 'yellow')}")
@@ -1326,8 +1546,8 @@ def fetch_all_snapshots(
     selected_providers: set[str],
     codex_sessions_dir: Path,
     gemini_tmp_dir: Path,
-    gemini_minute_limit_requests: int,
-    gemini_day_limit_requests: int,
+    gemini_pro_limit_requests: int,
+    gemini_non_pro_limit_requests: int,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, str, str, str]:
     claude_snapshot: dict[str, Any] | None = None
     codex_snapshot: dict[str, Any] | None = None
@@ -1342,7 +1562,7 @@ def fetch_all_snapshots(
             claude_snapshot = fetch_claude_snapshot()
             claude_status = "Live usage"
         except urllib.error.HTTPError as exc:
-            claude_status = f"HTTP {exc.code} from Claude usage API"
+            claude_status = format_claude_http_error(exc)
         except urllib.error.URLError:
             claude_status = "Network error reaching Claude usage API"
         except Exception as exc:  # noqa: BLE001
@@ -1361,10 +1581,10 @@ def fetch_all_snapshots(
         try:
             gemini_snapshot = fetch_gemini_snapshot(
                 gemini_tmp_dir.expanduser(),
-                gemini_minute_limit_requests,
-                gemini_day_limit_requests,
+                gemini_pro_limit_requests,
+                gemini_non_pro_limit_requests,
             )
-            gemini_status = "Local usage"
+            gemini_status = "Live usage" if gemini_snapshot.get("source") == "api" else "Local usage"
         except Exception as exc:  # noqa: BLE001
             gemini_status = str(exc)
 
@@ -1491,8 +1711,8 @@ def run_topmost_window(args: argparse.Namespace, selected_providers: set[str]) -
             selected_providers=selected_providers,
             codex_sessions_dir=args.codex_sessions_dir,
             gemini_tmp_dir=args.gemini_tmp_dir,
-            gemini_minute_limit_requests=args.gemini_minute_limit_requests,
-            gemini_day_limit_requests=args.gemini_day_limit_requests,
+            gemini_pro_limit_requests=args.gemini_pro_limit_requests,
+            gemini_non_pro_limit_requests=args.gemini_non_pro_limit_requests,
         )
 
         output = render_output(
@@ -1652,16 +1872,16 @@ def parse_args() -> argparse.Namespace:
         help="Gemini CLI tmp directory (default: ~/.gemini/tmp)",
     )
     parser.add_argument(
-        "--gemini-minute-limit-requests",
+        "--gemini-pro-limit-requests",
         type=int,
-        default=120,
-        help="Gemini request limit per minute for mini bars (default: 120)",
+        default=50,
+        help="Gemini Pro model request limit per day (default: 50)",
     )
     parser.add_argument(
-        "--gemini-day-limit-requests",
+        "--gemini-non-pro-limit-requests",
         type=int,
         default=1500,
-        help="Gemini request limit per day for mini bars (default: 1500)",
+        help="Gemini Non-Pro (Flash) model request limit per day (default: 1500)",
     )
 
     parser.add_argument(
@@ -1719,11 +1939,11 @@ def main() -> int:
     if args.critical_threshold < args.warn_threshold:
         print("--critical-threshold must be >= --warn-threshold", file=sys.stderr)
         return 2
-    if args.gemini_minute_limit_requests < 0:
-        print("--gemini-minute-limit-requests must be >= 0", file=sys.stderr)
+    if args.gemini_pro_limit_requests < 0:
+        print("--gemini-pro-limit-requests must be >= 0", file=sys.stderr)
         return 2
-    if args.gemini_day_limit_requests < 0:
-        print("--gemini-day-limit-requests must be >= 0", file=sys.stderr)
+    if args.gemini_non_pro_limit_requests < 0:
+        print("--gemini-non-pro-limit-requests must be >= 0", file=sys.stderr)
         return 2
     if args.always_on_top and sys.platform != "darwin":
         print("--always-on-top is currently supported on macOS only", file=sys.stderr)
@@ -1778,8 +1998,8 @@ def main() -> int:
                     selected_providers=selected_providers,
                     codex_sessions_dir=args.codex_sessions_dir,
                     gemini_tmp_dir=args.gemini_tmp_dir,
-                    gemini_minute_limit_requests=args.gemini_minute_limit_requests,
-                    gemini_day_limit_requests=args.gemini_day_limit_requests,
+                    gemini_pro_limit_requests=args.gemini_pro_limit_requests,
+                    gemini_non_pro_limit_requests=args.gemini_non_pro_limit_requests,
                 )
 
                 if args.json:
