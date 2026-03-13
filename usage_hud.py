@@ -1542,6 +1542,70 @@ def render_mini(
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Claude API cache with exponential backoff
+# ---------------------------------------------------------------------------
+
+_claude_cache: dict[str, Any] = {
+    "snapshot": None,
+    "status": "Initializing",
+    "fetched_at": 0.0,       # time.monotonic() of last successful fetch
+    "backoff": 0.0,           # current backoff seconds (0 = no backoff)
+    "last_attempt": 0.0,      # time.monotonic() of last attempt (success or fail)
+}
+
+CLAUDE_CACHE_TTL = 300.0        # 5 minutes between successful fetches
+CLAUDE_BACKOFF_INITIAL = 300.0  # first retry after 5 minutes
+CLAUDE_BACKOFF_MAX = 1800.0     # cap backoff at 30 minutes
+
+
+def fetch_claude_cached() -> tuple[dict[str, Any] | None, str]:
+    """Return (snapshot, status) using a TTL cache with exponential backoff."""
+    now = time.monotonic()
+
+    # If we have a cached result and it's still fresh, reuse it.
+    if _claude_cache["snapshot"] is not None:
+        age = now - _claude_cache["fetched_at"]
+        if age < CLAUDE_CACHE_TTL:
+            return _claude_cache["snapshot"], _claude_cache["status"]
+
+    # If we're in a backoff window after a failure, return stale/cached data.
+    if _claude_cache["backoff"] > 0:
+        since_last = now - _claude_cache["last_attempt"]
+        if since_last < _claude_cache["backoff"]:
+            snapshot = _claude_cache["snapshot"]
+            status = _claude_cache["status"] if snapshot else "Retrying soon…"
+            return snapshot, status
+
+    # Time to fetch.
+    _claude_cache["last_attempt"] = now
+    try:
+        snapshot = fetch_claude_snapshot()
+        _claude_cache["snapshot"] = snapshot
+        _claude_cache["status"] = "Live usage"
+        _claude_cache["fetched_at"] = now
+        _claude_cache["backoff"] = 0.0
+        return snapshot, "Live usage"
+    except urllib.error.HTTPError as exc:
+        status = format_claude_http_error(exc)
+    except urllib.error.URLError:
+        status = "Network error reaching Claude usage API"
+    except Exception as exc:  # noqa: BLE001
+        status = str(exc)
+
+    # Failure: apply exponential backoff, but keep any stale snapshot.
+    prev = _claude_cache["backoff"]
+    _claude_cache["backoff"] = min(
+        CLAUDE_BACKOFF_MAX,
+        CLAUDE_BACKOFF_INITIAL if prev == 0 else prev * 2,
+    )
+    if _claude_cache["snapshot"] is not None:
+        # Show stale data with an indicator.
+        return _claude_cache["snapshot"], _claude_cache["status"] + " (stale)"
+    _claude_cache["status"] = status
+    return None, status
+
+
 def fetch_all_snapshots(
     selected_providers: set[str],
     codex_sessions_dir: Path,
@@ -1557,16 +1621,7 @@ def fetch_all_snapshots(
     gemini_status = "Disabled by --providers"
 
     if "claude" in selected_providers:
-        claude_status = "Initializing"
-        try:
-            claude_snapshot = fetch_claude_snapshot()
-            claude_status = "Live usage"
-        except urllib.error.HTTPError as exc:
-            claude_status = format_claude_http_error(exc)
-        except urllib.error.URLError:
-            claude_status = "Network error reaching Claude usage API"
-        except Exception as exc:  # noqa: BLE001
-            claude_status = str(exc)
+        claude_snapshot, claude_status = fetch_claude_cached()
 
     if "codex" in selected_providers:
         codex_status = "Initializing"
