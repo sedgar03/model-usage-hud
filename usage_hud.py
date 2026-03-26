@@ -34,6 +34,7 @@ STYLE = {
     "yellow": "\033[33m",
     "cyan": "\033[36m",
     "white": "\033[37m",
+    "orange": "\033[38;5;208m",
     "brown": "\033[38;5;130m",
     "bold_red": "\033[1;31m",
     "bold_green": "\033[1;32m",
@@ -318,7 +319,7 @@ def pace_style(delta: int) -> str:
     return "cyan"
 
 
-def pct_bar(pct: int, width: int = 16) -> str:
+def pct_bar(pct: int, width: int = 16, *, stale: bool = False) -> str:
     pct = max(0, min(pct, 100))
     filled = int(round((pct / 100.0) * width))
     if BAR_STYLE == "solid":
@@ -327,10 +328,11 @@ def pct_bar(pct: int, width: int = 16) -> str:
     else:
         fill = "▓" * filled
         empty = "░" * (width - filled)
-    return ANSI.style(fill, usage_style(pct)) + ANSI.style(empty, "dim")
+    fill_style = "orange" if stale else usage_style(pct)
+    return ANSI.style(fill, fill_style) + ANSI.style(empty, "dim")
 
 
-def build_pace_bar(actual_pct: int, expected_pct: int, width: int = 24) -> str:
+def build_pace_bar(actual_pct: int, expected_pct: int, width: int = 24, *, stale: bool = False) -> str:
     actual_units = int(round((max(0, min(actual_pct, 100)) / 100.0) * width))
     expected_units = int(round((max(0, min(expected_pct, 100)) / 100.0) * width))
     marker_idx = max(0, min(width - 1, expected_units - 1 if expected_units > 0 else 0))
@@ -340,7 +342,9 @@ def build_pace_bar(actual_pct: int, expected_pct: int, width: int = 24) -> str:
         for i in range(width):
             pos = i + 1
             cell_style = "dim"
-            if pos <= min(actual_units, expected_units):
+            if stale:
+                cell_style = "orange" if pos <= actual_units else "dim"
+            elif pos <= min(actual_units, expected_units):
                 cell_style = "cyan"
             elif actual_units > expected_units and expected_units < pos <= actual_units:
                 cell_style = "red"
@@ -350,9 +354,12 @@ def build_pace_bar(actual_pct: int, expected_pct: int, width: int = 24) -> str:
                 cell_style = "cyan"
 
             if i == marker_idx:
-                marker_style = "red" if actual_units > expected_units else "green"
-                if abs(actual_units - expected_units) <= 1:
-                    marker_style = "white"
+                if stale:
+                    marker_style = "orange"
+                else:
+                    marker_style = "red" if actual_units > expected_units else "green"
+                    if abs(actual_units - expected_units) <= 1:
+                        marker_style = "white"
                 pieces.append(ANSI.style("│", marker_style))
                 continue
 
@@ -363,13 +370,21 @@ def build_pace_bar(actual_pct: int, expected_pct: int, width: int = 24) -> str:
     for i in range(width):
         pos = i + 1
         if i == marker_idx:
-            marker_style = "red" if actual_units > expected_units else "green"
-            if abs(actual_units - expected_units) <= 1:
-                marker_style = "white"
+            if stale:
+                marker_style = "orange"
+            else:
+                marker_style = "red" if actual_units > expected_units else "green"
+                if abs(actual_units - expected_units) <= 1:
+                    marker_style = "white"
             pieces.append(ANSI.style("│", marker_style))
             continue
 
-        if pos <= min(actual_units, expected_units):
+        if stale:
+            if pos <= actual_units:
+                pieces.append(ANSI.style("▓", "orange"))
+            else:
+                pieces.append(ANSI.style("░", "dim"))
+        elif pos <= min(actual_units, expected_units):
             pieces.append(ANSI.style("▓", "cyan"))
         elif actual_units > expected_units and expected_units < pos <= actual_units:
             pieces.append(ANSI.style("▓", "red"))
@@ -860,14 +875,6 @@ def _start_of_local_minute(now_local: datetime) -> datetime:
     return now_local.replace(second=0, microsecond=0)
 
 
-def _utilization_from_count(used_count: int, limit_count: int) -> int | float | None:
-    if limit_count <= 0:
-        return None
-    pct = (used_count / float(limit_count)) * 100.0
-    if not DECIMALS and used_count > 0 and pct < 1.0:
-        return 1
-    return clamp_pct(pct)
-
 
 # ---------------------------------------------------------------------------
 # Gemini OAuth + API helpers
@@ -1033,114 +1040,69 @@ def fetch_gemini_api_snapshot() -> dict[str, Any]:
     }
 
 
-def fetch_gemini_local_snapshot(
-    gemini_tmp_dir: Path,
-    pro_limit_requests: int,
-    non_pro_limit_requests: int,
-) -> dict[str, Any]:
-    """Fallback: estimate usage from local session files."""
-    now_local = datetime.now().astimezone()
-    window_start = now_local - timedelta(days=1)
 
-    sessions_scanned = 0
-    pro_request_times: list[datetime] = []
-    non_pro_request_times: list[datetime] = []
-    pro_tokens = 0
-    non_pro_tokens = 0
-    model_totals: dict[str, int] = {}
+# ---------------------------------------------------------------------------
+# Gemini API cache with exponential backoff (mirrors Claude cache pattern)
+# ---------------------------------------------------------------------------
 
-    if gemini_tmp_dir.exists():
-        for session_file in gemini_tmp_dir.rglob("session-*.json"):
-            if session_file.parent.name != "chats":
-                continue
+_gemini_cache: dict[str, Any] = {
+    "snapshot": None,
+    "status": "Initializing",
+    "fetched_at": 0.0,
+    "backoff": 0.0,
+    "last_attempt": 0.0,
+}
 
-            try:
-                with session_file.open("r", encoding="utf-8", errors="replace") as handle:
-                    payload = json.load(handle)
-            except (OSError, json.JSONDecodeError):
-                continue
-
-            sessions_scanned += 1
-            messages = payload.get("messages")
-            if not isinstance(messages, list):
-                continue
-
-            for message in messages:
-                if not isinstance(message, dict):
-                    continue
-                if message.get("type") != "gemini":
-                    continue
-
-                ts = parse_iso(message.get("timestamp"))
-                if ts is None:
-                    continue
-
-                total_tokens = 0
-                tokens = message.get("tokens")
-                if isinstance(tokens, dict):
-                    try:
-                        total_tokens = int(tokens.get("total", 0))
-                    except (TypeError, ValueError):
-                        total_tokens = 0
-                total_tokens = max(0, total_tokens)
-
-                model = message.get("model")
-                if not isinstance(model, str) or not model:
-                    model = "unknown"
-                model_totals[model] = model_totals.get(model, 0) + total_tokens
-
-                if ts >= window_start:
-                    is_pro = "pro" in model.lower()
-                    if is_pro:
-                        pro_request_times.append(ts)
-                        pro_tokens += total_tokens
-                    else:
-                        non_pro_request_times.append(ts)
-                        non_pro_tokens += total_tokens
-
-    pro_requests = len(pro_request_times)
-    non_pro_requests = len(non_pro_request_times)
-
-    pro_reset = min(pro_request_times).astimezone() + timedelta(days=1) if pro_request_times else now_local + timedelta(days=1)
-    non_pro_reset = min(non_pro_request_times).astimezone() + timedelta(days=1) if non_pro_request_times else now_local + timedelta(days=1)
-
-    return {
-        "pro": {
-            "used_requests": pro_requests,
-            "limit_requests": max(0, pro_limit_requests),
-            "utilization": _utilization_from_count(pro_requests, pro_limit_requests),
-            "used_tokens": pro_tokens,
-            "resets_at": pro_reset.isoformat(),
-        },
-        "non_pro": {
-            "used_requests": non_pro_requests,
-            "limit_requests": max(0, non_pro_limit_requests),
-            "utilization": _utilization_from_count(non_pro_requests, non_pro_limit_requests),
-            "used_tokens": non_pro_tokens,
-            "resets_at": non_pro_reset.isoformat(),
-        },
-        "models": {
-            model: model_totals[model]
-            for model in sorted(model_totals)
-        },
-        "source": "local",
-        "sessions_scanned": sessions_scanned,
-        "updated_at": now_local.isoformat(),
-    }
+GEMINI_CACHE_TTL = 120.0        # 2 minutes between successful fetches
+GEMINI_BACKOFF_INITIAL = 120.0  # first retry after 2 minutes
+GEMINI_BACKOFF_MAX = 900.0      # cap backoff at 15 minutes
 
 
-def fetch_gemini_snapshot(
-    gemini_tmp_dir: Path,
-    pro_limit_requests: int,
-    non_pro_limit_requests: int,
-) -> dict[str, Any]:
-    """Try the real API first; fall back to local session-file scanning."""
+def fetch_gemini_cached() -> tuple[dict[str, Any] | None, str]:
+    """Return (snapshot, status) using a TTL cache with exponential backoff.
+
+    API-only — no local session-file fallback.  When the API is
+    unreachable the most recent successful snapshot is returned with a
+    "(stale)" status so the caller can render the bars in orange.
+    """
+    now = time.monotonic()
+
+    if _gemini_cache["snapshot"] is not None:
+        age = now - _gemini_cache["fetched_at"]
+        if age < GEMINI_CACHE_TTL:
+            return _gemini_cache["snapshot"], _gemini_cache["status"]
+
+    if _gemini_cache["backoff"] > 0:
+        since_last = now - _gemini_cache["last_attempt"]
+        if since_last < _gemini_cache["backoff"]:
+            snapshot = _gemini_cache["snapshot"]
+            status = _gemini_cache["status"] if snapshot else "Retrying soon…"
+            return snapshot, status
+
+    _gemini_cache["last_attempt"] = now
     try:
-        return fetch_gemini_api_snapshot()
-    except Exception:  # noqa: BLE001
-        return fetch_gemini_local_snapshot(
-            gemini_tmp_dir, pro_limit_requests, non_pro_limit_requests,
-        )
+        snapshot = fetch_gemini_api_snapshot()
+        _gemini_cache["snapshot"] = snapshot
+        _gemini_cache["status"] = "Live usage"
+        _gemini_cache["fetched_at"] = now
+        _gemini_cache["backoff"] = 0.0
+        return snapshot, "Live usage"
+    except urllib.error.HTTPError as exc:
+        status = f"Gemini API HTTP {exc.code}"
+    except urllib.error.URLError:
+        status = "Network error reaching Gemini API"
+    except Exception as exc:  # noqa: BLE001
+        status = str(exc)
+
+    prev = _gemini_cache["backoff"]
+    _gemini_cache["backoff"] = min(
+        GEMINI_BACKOFF_MAX,
+        GEMINI_BACKOFF_INITIAL if prev == 0 else prev * 2,
+    )
+    if _gemini_cache["snapshot"] is not None:
+        return _gemini_cache["snapshot"], _gemini_cache["status"] + " (stale)"
+    _gemini_cache["status"] = status
+    return None, status
 
 
 def render_window_compact(
@@ -1150,20 +1112,23 @@ def render_window_compact(
     warn: int,
     critical: int,
     burn_key: tuple[str, str] | None = None,
+    stale: bool = False,
 ) -> str:
     speedo = format_speedometer(burn_key)
     if pct is None:
         return f"{ANSI.style(label, 'bold')} --% {ANSI.style('no data', 'yellow')}"
 
-    pct_text = ANSI.style(fmt_pct(pct), "white")
+    pct_text = ANSI.style(fmt_pct(pct), "orange" if stale else "white")
     if expected is None:
-        return f"{ANSI.style(label, 'bold')} {pct_text} {pct_bar(pct, 14)}{speedo}"
+        bar = pct_bar(pct, 14, stale=stale)
+        return f"{ANSI.style(label, 'bold')} {pct_text} {bar}{speedo}"
 
     delta = pct - expected
-    delta_text = ANSI.style(fmt_delta(delta), pace_style(delta))
+    delta_text = ANSI.style(fmt_delta(delta), "orange" if stale else pace_style(delta))
     target_text = ANSI.style(f"({fmt_pct(expected).strip()})", "dim")
+    bar = build_pace_bar(pct, expected, 16, stale=stale)
     return (
-        f"{ANSI.style(label, 'bold')} {pct_text} {build_pace_bar(pct, expected, 16)} "
+        f"{ANSI.style(label, 'bold')} {pct_text} {bar} "
         f"{delta_text} {target_text}{speedo}"
     )
 
@@ -1180,6 +1145,8 @@ def render_claude_mini(
 
     if not snapshot:
         return [f"{first_prefix}{ANSI.style(status_line, 'yellow')}"]
+
+    stale = status_line.endswith("(stale)")
 
     now_local = datetime.now().astimezone()
     five = snapshot.get("five_hour") or {}
@@ -1207,6 +1174,7 @@ def render_claude_mini(
         warn,
         critical,
         burn_key=key_s,
+        stale=stale,
     )
     row_w = render_window_compact(
         "W",
@@ -1215,6 +1183,7 @@ def render_claude_mini(
         warn,
         critical,
         burn_key=key_w,
+        stale=stale,
     )
 
     lines = [f"{first_prefix}{row_s}", f"{second_prefix}{row_w}"]
@@ -1224,7 +1193,8 @@ def render_claude_mini(
         lines.append(f"{cont_prefix}{ANSI.style('O', 'dim')} {fmt_pct(opus_pct)}")
 
     if status_line != "Live usage":
-        lines.append(f"{cont_prefix}{ANSI.style(status_line, 'yellow')}")
+        status_style = "orange" if stale else "yellow"
+        lines.append(f"{cont_prefix}{ANSI.style(status_line, status_style)}")
 
     return lines
 
@@ -1344,6 +1314,8 @@ def render_gemini_mini(
     if not snapshot:
         return [f"{first_prefix}{ANSI.style(status_line, 'yellow')}"]
 
+    stale = status_line.endswith("(stale)")
+
     pro = snapshot.get("pro") if isinstance(snapshot.get("pro"), dict) else {}
     non_pro = snapshot.get("non_pro") if isinstance(snapshot.get("non_pro"), dict) else {}
 
@@ -1384,6 +1356,7 @@ def render_gemini_mini(
         warn,
         critical,
         burn_key=key_p,
+        stale=stale,
     )
     row_non = render_window_compact(
         "N",
@@ -1392,12 +1365,14 @@ def render_gemini_mini(
         warn,
         critical,
         burn_key=key_n,
+        stale=stale,
     )
 
     lines = [f"{first_prefix}{row_pro}", f"{second_prefix}{row_non}"]
 
-    if status_line != "Local usage":
-        lines.append(f"{cont_prefix}{ANSI.style(status_line, 'yellow')}")
+    if status_line != "Live usage":
+        status_style = "orange" if stale else "yellow"
+        lines.append(f"{cont_prefix}{ANSI.style(status_line, status_style)}")
 
     return lines
 
@@ -1609,9 +1584,6 @@ def fetch_claude_cached() -> tuple[dict[str, Any] | None, str]:
 def fetch_all_snapshots(
     selected_providers: set[str],
     codex_sessions_dir: Path,
-    gemini_tmp_dir: Path,
-    gemini_pro_limit_requests: int,
-    gemini_non_pro_limit_requests: int,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, str, str, str]:
     claude_snapshot: dict[str, Any] | None = None
     codex_snapshot: dict[str, Any] | None = None
@@ -1632,16 +1604,7 @@ def fetch_all_snapshots(
             codex_status = str(exc)
 
     if "gemini" in selected_providers:
-        gemini_status = "Initializing"
-        try:
-            gemini_snapshot = fetch_gemini_snapshot(
-                gemini_tmp_dir.expanduser(),
-                gemini_pro_limit_requests,
-                gemini_non_pro_limit_requests,
-            )
-            gemini_status = "Live usage" if gemini_snapshot.get("source") == "api" else "Local usage"
-        except Exception as exc:  # noqa: BLE001
-            gemini_status = str(exc)
+        gemini_snapshot, gemini_status = fetch_gemini_cached()
 
     return (
         claude_snapshot,
@@ -1765,9 +1728,6 @@ def run_topmost_window(args: argparse.Namespace, selected_providers: set[str]) -
         ) = fetch_all_snapshots(
             selected_providers=selected_providers,
             codex_sessions_dir=args.codex_sessions_dir,
-            gemini_tmp_dir=args.gemini_tmp_dir,
-            gemini_pro_limit_requests=args.gemini_pro_limit_requests,
-            gemini_non_pro_limit_requests=args.gemini_non_pro_limit_requests,
         )
 
         output = render_output(
@@ -1921,25 +1881,6 @@ def parse_args() -> argparse.Namespace:
         help="Show title bar in --always-on-top mode",
     )
     parser.add_argument(
-        "--gemini-tmp-dir",
-        type=Path,
-        default=Path.home() / ".gemini" / "tmp",
-        help="Gemini CLI tmp directory (default: ~/.gemini/tmp)",
-    )
-    parser.add_argument(
-        "--gemini-pro-limit-requests",
-        type=int,
-        default=50,
-        help="Gemini Pro model request limit per day (default: 50)",
-    )
-    parser.add_argument(
-        "--gemini-non-pro-limit-requests",
-        type=int,
-        default=1500,
-        help="Gemini Non-Pro (Flash) model request limit per day (default: 1500)",
-    )
-
-    parser.add_argument(
         "--speedometer",
         action="store_true",
         help="Show burn-rate and ETA-to-throttle suffix on each window line",
@@ -1994,12 +1935,6 @@ def main() -> int:
     if args.critical_threshold < args.warn_threshold:
         print("--critical-threshold must be >= --warn-threshold", file=sys.stderr)
         return 2
-    if args.gemini_pro_limit_requests < 0:
-        print("--gemini-pro-limit-requests must be >= 0", file=sys.stderr)
-        return 2
-    if args.gemini_non_pro_limit_requests < 0:
-        print("--gemini-non-pro-limit-requests must be >= 0", file=sys.stderr)
-        return 2
     if args.always_on_top and sys.platform != "darwin":
         print("--always-on-top is currently supported on macOS only", file=sys.stderr)
         return 2
@@ -2052,9 +1987,6 @@ def main() -> int:
                 ) = fetch_all_snapshots(
                     selected_providers=selected_providers,
                     codex_sessions_dir=args.codex_sessions_dir,
-                    gemini_tmp_dir=args.gemini_tmp_dir,
-                    gemini_pro_limit_requests=args.gemini_pro_limit_requests,
-                    gemini_non_pro_limit_requests=args.gemini_non_pro_limit_requests,
                 )
 
                 if args.json:
