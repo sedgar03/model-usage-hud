@@ -20,6 +20,14 @@ from pathlib import Path
 import re
 from typing import Any
 
+from model_usage_hud.core.builders import (
+    build_note_line,
+    build_provider_section as build_section_model,
+    build_provider_view_models,
+    build_window_metric_row,
+)
+from model_usage_hud.core.models import MetricRow, NoteLine, ProviderSection, SnapshotBundle
+
 
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -165,15 +173,19 @@ def _format_eta(hours: float) -> str:
     return f"~{days:.1f}d"
 
 
+def format_speedometer_values(rate: float | None, eta: float | None) -> str:
+    if not SPEEDOMETER_ENABLED or rate is None:
+        return ""
+    eta_str = f" {_format_eta(eta)}" if eta is not None else ""
+    return ANSI.style(f" \u23F1 +{rate:.0f}%/h{eta_str}", "dim")
+
+
 def format_speedometer(key: tuple[str, str] | None) -> str:
     if key is None or not SPEEDOMETER_ENABLED:
         return ""
     rate = BURN_TRACKER.burn_rate(key)
-    if rate is None:
-        return ""
     eta = BURN_TRACKER.eta_hours(key)
-    eta_str = f" {_format_eta(eta)}" if eta is not None else ""
-    return ANSI.style(f" \u23F1 +{rate:.0f}%/h{eta_str}", "dim")
+    return format_speedometer_values(rate, eta)
 
 
 def clamp_pct(value: Any) -> int | float:
@@ -1114,39 +1126,141 @@ def render_window_compact(
     burn_key: tuple[str, str] | None = None,
     stale: bool = False,
 ) -> str:
-    speedo = format_speedometer(burn_key)
-    if pct is None:
-        return f"{ANSI.style(label, 'bold')} --% {ANSI.style('no data', 'yellow')}"
+    burn_rate = BURN_TRACKER.burn_rate(burn_key) if burn_key is not None and pct is not None else None
+    eta = BURN_TRACKER.eta_hours(burn_key) if burn_key is not None and pct is not None else None
+    row = build_window_metric_row(
+        label=label,
+        utilization=pct,
+        expected_utilization=expected,
+        stale=stale,
+        burn_rate_per_hour=burn_rate,
+        eta_hours=eta,
+    )
+    return format_metric_row(row)
 
-    pct_text = ANSI.style(fmt_pct(pct), "orange" if stale else "white")
-    if expected is None:
-        bar = pct_bar(pct, 14, stale=stale)
-        return f"{ANSI.style(label, 'bold')} {pct_text} {bar}{speedo}"
 
-    delta = pct - expected
-    delta_text = ANSI.style(fmt_delta(delta), "orange" if stale else pace_style(delta))
-    target_text = ANSI.style(f"({fmt_pct(expected).strip()})", "dim")
-    bar = build_pace_bar(pct, expected, 16, stale=stale)
-    return (
-        f"{ANSI.style(label, 'bold')} {pct_text} {bar} "
-        f"{delta_text} {target_text}{speedo}"
+def _provider_title(provider: str) -> str:
+    return {
+        "claude": "Claude",
+        "codex": "Codex",
+        "gemini": "Gemini",
+    }[provider]
+
+
+def _provider_accent(provider: str) -> str:
+    return {
+        "claude": "brown",
+        "codex": "white",
+        "gemini": "cyan",
+    }[provider]
+
+
+def _build_metric_row_model(
+    *,
+    label: str,
+    pct: int | float | None,
+    expected: int | float | None,
+    burn_key: tuple[str, str] | None = None,
+    stale: bool = False,
+    record_burn: bool = False,
+    prefix: str | None = None,
+    display_mode: str = "pace",
+) -> MetricRow:
+    burn_rate = None
+    eta = None
+    if burn_key is not None and pct is not None:
+        if record_burn:
+            BURN_TRACKER.record(burn_key, pct)
+        burn_rate = BURN_TRACKER.burn_rate(burn_key)
+        eta = BURN_TRACKER.eta_hours(burn_key)
+
+    return build_window_metric_row(
+        label=label,
+        utilization=pct,
+        expected_utilization=expected,
+        display_mode=display_mode,
+        stale=stale,
+        prefix=prefix,
+        burn_rate_per_hour=burn_rate,
+        eta_hours=eta,
     )
 
 
-def render_claude_mini(
+def format_note_line(note: NoteLine) -> str:
+    if note.style == "plain":
+        return note.text
+    return ANSI.style(note.text, note.style)
+
+
+def format_metric_row(row: MetricRow) -> str:
+    prefix_text = ""
+    if row.prefix:
+        prefix_text = f"{ANSI.style(row.prefix, row.prefix_style)} "
+
+    if row.display_mode == "value_only":
+        value_text = "--%" if row.utilization is None else fmt_pct(row.utilization)
+        return f"{prefix_text}{ANSI.style(row.label, 'dim')} {value_text}"
+
+    speedo = format_speedometer_values(row.burn_rate_per_hour, row.eta_hours)
+    if row.utilization is None:
+        return f"{prefix_text}{ANSI.style(row.label, 'bold')} --% {ANSI.style('no data', 'yellow')}"
+
+    pct_text = ANSI.style(fmt_pct(row.utilization), "orange" if row.stale else "white")
+    if row.expected_utilization is None:
+        bar = pct_bar(row.utilization, 14, stale=row.stale)
+        return f"{prefix_text}{ANSI.style(row.label, 'bold')} {pct_text} {bar}{speedo}"
+
+    delta = row.delta if row.delta is not None else row.utilization - row.expected_utilization
+    delta_text = ANSI.style(fmt_delta(delta), "orange" if row.stale else pace_style(delta))
+    target_text = ANSI.style(f"({fmt_pct(row.expected_utilization).strip()})", "dim")
+    bar = build_pace_bar(row.utilization, row.expected_utilization, 16, stale=row.stale)
+    return f"{prefix_text}{ANSI.style(row.label, 'bold')} {pct_text} {bar} {delta_text} {target_text}{speedo}"
+
+
+def render_provider_section(section: ProviderSection, show_badge: bool = True) -> list[str]:
+    first_prefix, second_prefix = provider_badge_lines(section.provider, show_badge=show_badge)
+    cont_prefix = " " * visible_len(first_prefix)
+    lines: list[str] = []
+
+    for idx, row in enumerate(section.rows):
+        if idx == 0:
+            prefix = first_prefix
+        elif idx == 1:
+            prefix = second_prefix
+        else:
+            prefix = cont_prefix
+        lines.append(f"{prefix}{format_metric_row(row)}")
+
+    if not lines and section.notes:
+        first_note, *rest = section.notes
+        lines.append(f"{first_prefix}{format_note_line(first_note)}")
+        for note in rest:
+            lines.append(f"{cont_prefix}{format_note_line(note)}")
+        return lines
+
+    for note in section.notes:
+        lines.append(f"{cont_prefix}{format_note_line(note)}")
+    return lines
+
+
+def build_claude_provider_section(
     snapshot: dict[str, Any] | None,
     status_line: str,
-    warn: int,
-    critical: int,
-    show_badge: bool = True,
-) -> list[str]:
-    first_prefix, second_prefix = provider_badge_lines("claude", show_badge=show_badge)
-    cont_prefix = " " * visible_len(first_prefix)
+) -> ProviderSection:
+    stale = status_line.endswith("(stale)")
+    rows: list[MetricRow] = []
+    notes: list[NoteLine] = []
 
     if not snapshot:
-        return [f"{first_prefix}{ANSI.style(status_line, 'yellow')}"]
-
-    stale = status_line.endswith("(stale)")
+        notes.append(build_note_line(status_line, "yellow"))
+        return build_section_model(
+            provider="claude",
+            title=_provider_title("claude"),
+            status=status_line,
+            notes=tuple(notes),
+            stale=stale,
+            accent=_provider_accent("claude"),
+        )
 
     now_local = datetime.now().astimezone()
     five = snapshot.get("five_hour") or {}
@@ -1160,43 +1274,63 @@ def render_claude_mini(
         seven.get("resets_at"), timedelta(days=7), now_local
     )
 
-    key_s = ("claude", "S")
-    key_w = ("claude", "W")
-    if five_pct is not None:
-        BURN_TRACKER.record(key_s, five_pct)
-    if seven_pct is not None:
-        BURN_TRACKER.record(key_w, seven_pct)
-
-    row_s = render_window_compact(
-        "S",
-        five_pct,
-        five_expected,
-        warn,
-        critical,
-        burn_key=key_s,
-        stale=stale,
+    rows.append(
+        _build_metric_row_model(
+            label="S",
+            pct=five_pct,
+            expected=five_expected,
+            burn_key=("claude", "S"),
+            stale=stale,
+            record_burn=True,
+        )
     )
-    row_w = render_window_compact(
-        "W",
-        seven_pct,
-        seven_expected,
-        warn,
-        critical,
-        burn_key=key_w,
-        stale=stale,
+    rows.append(
+        _build_metric_row_model(
+            label="W",
+            pct=seven_pct,
+            expected=seven_expected,
+            burn_key=("claude", "W"),
+            stale=stale,
+            record_burn=True,
+        )
     )
-
-    lines = [f"{first_prefix}{row_s}", f"{second_prefix}{row_w}"]
 
     if isinstance(opus, dict) and opus.get("utilization") is not None:
-        opus_pct = clamp_pct(opus.get("utilization"))
-        lines.append(f"{cont_prefix}{ANSI.style('O', 'dim')} {fmt_pct(opus_pct)}")
+        rows.append(
+            _build_metric_row_model(
+                label="O",
+                pct=clamp_pct(opus.get("utilization")),
+                expected=None,
+                display_mode="value_only",
+            )
+        )
 
     if status_line != "Live usage":
-        status_style = "orange" if stale else "yellow"
-        lines.append(f"{cont_prefix}{ANSI.style(status_line, status_style)}")
+        notes.append(build_note_line(status_line, "orange" if stale else "yellow"))
 
-    return lines
+    return build_section_model(
+        provider="claude",
+        title=_provider_title("claude"),
+        status=status_line,
+        rows=tuple(rows),
+        notes=tuple(notes),
+        stale=stale,
+        accent=_provider_accent("claude"),
+    )
+
+
+def render_claude_mini(
+    snapshot: dict[str, Any] | None,
+    status_line: str,
+    warn: int,
+    critical: int,
+    show_badge: bool = True,
+) -> list[str]:
+    del warn, critical
+    return render_provider_section(
+        build_claude_provider_section(snapshot, status_line),
+        show_badge=show_badge,
+    )
 
 
 def select_codex_sources(sources: dict[str, Any], all_limits: bool) -> list[tuple[str, dict[str, Any]]]:
@@ -1219,28 +1353,37 @@ def select_codex_sources(sources: dict[str, Any], all_limits: bool) -> list[tupl
     return []
 
 
-def render_codex_mini(
+def build_codex_provider_section(
     snapshot: dict[str, Any] | None,
     status_line: str,
-    warn: int,
-    critical: int,
     all_limits: bool,
-    show_badge: bool = True,
-) -> list[str]:
-    first_prefix, second_prefix = provider_badge_lines("codex", show_badge=show_badge)
-    cont_prefix = " " * visible_len(first_prefix)
+) -> ProviderSection:
+    rows: list[MetricRow] = []
+    notes: list[NoteLine] = []
 
     if not snapshot:
-        return [f"{first_prefix}{ANSI.style(status_line, 'yellow')}"]
+        notes.append(build_note_line(status_line, "yellow"))
+        return build_section_model(
+            provider="codex",
+            title=_provider_title("codex"),
+            status=status_line,
+            notes=tuple(notes),
+            accent=_provider_accent("codex"),
+        )
 
     sources = snapshot.get("sources")
     if not isinstance(sources, dict) or not sources:
-        return [f"{first_prefix}{ANSI.style('no token_count events in ~/.codex/sessions', 'yellow')}"]
+        notes.append(build_note_line("no token_count events in ~/.codex/sessions", "yellow"))
+        return build_section_model(
+            provider="codex",
+            title=_provider_title("codex"),
+            status=status_line,
+            notes=tuple(notes),
+            accent=_provider_accent("codex"),
+        )
 
-    lines: list[str] = []
     now_epoch = time.time()
     selected_sources = select_codex_sources(sources, all_limits)
-
     for idx, (limit_id, item) in enumerate(selected_sources):
         primary = item.get("primary")
         secondary = item.get("secondary")
@@ -1255,66 +1398,73 @@ def render_codex_mini(
         s_reset = int(secondary.get("resets_at") or 0) if isinstance(secondary, dict) else 0
         s_expected = expected_pct_from_epoch_reset(s_reset, s_window, now_epoch)
 
-        key_s = ("codex", f"{limit_id}/S")
-        key_w = ("codex", f"{limit_id}/W")
-        if p_pct is not None:
-            BURN_TRACKER.record(key_s, p_pct)
-        if s_pct is not None:
-            BURN_TRACKER.record(key_w, s_pct)
-
-        row_s = render_window_compact(
-            "S",
-            p_pct,
-            p_expected,
-            warn,
-            critical,
-            burn_key=key_s,
+        prefix = limit_id.upper() if all_limits else None
+        rows.append(
+            _build_metric_row_model(
+                label="S",
+                pct=p_pct,
+                expected=p_expected,
+                burn_key=("codex", f"{limit_id}/S"),
+                record_burn=True,
+                prefix=prefix,
+            )
         )
-        row_w = render_window_compact(
-            "W",
-            s_pct,
-            s_expected,
-            warn,
-            critical,
-            burn_key=key_w,
+        rows.append(
+            _build_metric_row_model(
+                label="W",
+                pct=s_pct,
+                expected=s_expected,
+                burn_key=("codex", f"{limit_id}/W"),
+                record_burn=True,
+            )
         )
-
-        if all_limits:
-            label = ANSI.style(limit_id.upper(), "dim")
-            if idx == 0:
-                lines.append(f"{first_prefix}{label} {row_s}")
-                lines.append(f"{second_prefix}{row_w}")
-            else:
-                lines.append(f"{cont_prefix}{label} {row_s}")
-                lines.append(f"{cont_prefix}{row_w}")
-        else:
-            if idx == 0:
-                lines.append(f"{first_prefix}{row_s}")
-                lines.append(f"{second_prefix}{row_w}")
-            else:
-                lines.append(f"{cont_prefix}{row_s}")
-                lines.append(f"{cont_prefix}{row_w}")
 
     if status_line != "Local usage":
-        lines.append(f"{cont_prefix}{ANSI.style(status_line, 'yellow')}")
+        notes.append(build_note_line(status_line, "yellow"))
 
-    return lines
+    return build_section_model(
+        provider="codex",
+        title=_provider_title("codex"),
+        status=status_line,
+        rows=tuple(rows),
+        notes=tuple(notes),
+        accent=_provider_accent("codex"),
+    )
 
 
-def render_gemini_mini(
+def render_codex_mini(
     snapshot: dict[str, Any] | None,
     status_line: str,
     warn: int,
     critical: int,
+    all_limits: bool,
     show_badge: bool = True,
 ) -> list[str]:
-    first_prefix, second_prefix = provider_badge_lines("gemini", show_badge=show_badge)
-    cont_prefix = " " * visible_len(first_prefix)
+    del warn, critical
+    return render_provider_section(
+        build_codex_provider_section(snapshot, status_line, all_limits),
+        show_badge=show_badge,
+    )
+
+
+def build_gemini_provider_section(
+    snapshot: dict[str, Any] | None,
+    status_line: str,
+) -> ProviderSection:
+    stale = status_line.endswith("(stale)")
+    rows: list[MetricRow] = []
+    notes: list[NoteLine] = []
 
     if not snapshot:
-        return [f"{first_prefix}{ANSI.style(status_line, 'yellow')}"]
-
-    stale = status_line.endswith("(stale)")
+        notes.append(build_note_line(status_line, "yellow"))
+        return build_section_model(
+            provider="gemini",
+            title=_provider_title("gemini"),
+            status=status_line,
+            notes=tuple(notes),
+            stale=stale,
+            accent=_provider_accent("gemini"),
+        )
 
     pro = snapshot.get("pro") if isinstance(snapshot.get("pro"), dict) else {}
     non_pro = snapshot.get("non_pro") if isinstance(snapshot.get("non_pro"), dict) else {}
@@ -1330,13 +1480,6 @@ def render_gemini_mini(
         else None
     )
 
-    key_p = ("gemini", "P")
-    key_n = ("gemini", "N")
-    if pro_pct is not None:
-        BURN_TRACKER.record(key_p, pro_pct)
-    if non_pro_pct is not None:
-        BURN_TRACKER.record(key_n, non_pro_pct)
-
     now_local = datetime.now().astimezone()
     pro_expected = (
         expected_pct_from_iso_reset(pro.get("resets_at"), timedelta(days=1), now_local)
@@ -1349,32 +1492,53 @@ def render_gemini_mini(
         else None
     )
 
-    row_pro = render_window_compact(
-        "P",
-        pro_pct,
-        pro_expected,
-        warn,
-        critical,
-        burn_key=key_p,
-        stale=stale,
+    rows.append(
+        _build_metric_row_model(
+            label="P",
+            pct=pro_pct,
+            expected=pro_expected,
+            burn_key=("gemini", "P"),
+            stale=stale,
+            record_burn=True,
+        )
     )
-    row_non = render_window_compact(
-        "N",
-        non_pro_pct,
-        non_pro_expected,
-        warn,
-        critical,
-        burn_key=key_n,
-        stale=stale,
+    rows.append(
+        _build_metric_row_model(
+            label="N",
+            pct=non_pro_pct,
+            expected=non_pro_expected,
+            burn_key=("gemini", "N"),
+            stale=stale,
+            record_burn=True,
+        )
     )
-
-    lines = [f"{first_prefix}{row_pro}", f"{second_prefix}{row_non}"]
 
     if status_line != "Live usage":
-        status_style = "orange" if stale else "yellow"
-        lines.append(f"{cont_prefix}{ANSI.style(status_line, status_style)}")
+        notes.append(build_note_line(status_line, "orange" if stale else "yellow"))
 
-    return lines
+    return build_section_model(
+        provider="gemini",
+        title=_provider_title("gemini"),
+        status=status_line,
+        rows=tuple(rows),
+        notes=tuple(notes),
+        stale=stale,
+        accent=_provider_accent("gemini"),
+    )
+
+
+def render_gemini_mini(
+    snapshot: dict[str, Any] | None,
+    status_line: str,
+    warn: int,
+    critical: int,
+    show_badge: bool = True,
+) -> list[str]:
+    del warn, critical
+    return render_provider_section(
+        build_gemini_provider_section(snapshot, status_line),
+        show_badge=show_badge,
+    )
 
 
 def parse_provider_selection(raw_value: str) -> set[str]:
@@ -1410,39 +1574,111 @@ def build_provider_sections(
     all_limits: bool,
     show_badges: bool,
 ) -> list[list[str]]:
-    sections: list[list[str]] = []
-    if "claude" in selected_providers:
-        sections.append(
-            render_claude_mini(
-                claude_snapshot,
-                claude_status,
-                warn,
-                critical,
-                show_badge=show_badges,
-            )
+    del warn, critical
+    return [
+        render_provider_section(section, show_badge=show_badges)
+        for section in build_provider_section_models(
+            selected_providers=selected_providers,
+            claude_snapshot=claude_snapshot,
+            codex_snapshot=codex_snapshot,
+            gemini_snapshot=gemini_snapshot,
+            claude_status=claude_status,
+            codex_status=codex_status,
+            gemini_status=gemini_status,
+            all_limits=all_limits,
         )
-    if "codex" in selected_providers:
-        sections.append(
-            render_codex_mini(
-                codex_snapshot,
-                codex_status,
-                warn,
-                critical,
-                all_limits,
-                show_badge=show_badges,
-            )
-        )
-    if "gemini" in selected_providers:
-        sections.append(
-            render_gemini_mini(
-                gemini_snapshot,
-                gemini_status,
-                warn,
-                critical,
-                show_badge=show_badges,
-            )
-        )
-    return sections
+    ]
+
+
+def build_snapshot_bundle(
+    *,
+    selected_providers: set[str],
+    claude_snapshot: dict[str, Any] | None,
+    codex_snapshot: dict[str, Any] | None,
+    gemini_snapshot: dict[str, Any] | None,
+    claude_status: str,
+    codex_status: str,
+    gemini_status: str,
+) -> SnapshotBundle:
+    return SnapshotBundle(
+        generated_at=datetime.now().astimezone().isoformat(),
+        selected_providers=tuple(
+            provider for provider in PROVIDER_ORDER if provider in selected_providers
+        ),
+        claude_snapshot=claude_snapshot,
+        codex_snapshot=codex_snapshot,
+        gemini_snapshot=gemini_snapshot,
+        claude_status=claude_status,
+        codex_status=codex_status,
+        gemini_status=gemini_status,
+    )
+
+
+def build_provider_section_models(
+    *,
+    selected_providers: set[str],
+    claude_snapshot: dict[str, Any] | None,
+    codex_snapshot: dict[str, Any] | None,
+    gemini_snapshot: dict[str, Any] | None,
+    claude_status: str,
+    codex_status: str,
+    gemini_status: str,
+    all_limits: bool,
+) -> tuple[ProviderSection, ...]:
+    sections_by_provider = {
+        "claude": build_claude_provider_section(claude_snapshot, claude_status)
+        if "claude" in selected_providers
+        else None,
+        "codex": build_codex_provider_section(codex_snapshot, codex_status, all_limits)
+        if "codex" in selected_providers
+        else None,
+        "gemini": build_gemini_provider_section(gemini_snapshot, gemini_status)
+        if "gemini" in selected_providers
+        else None,
+    }
+    return build_provider_view_models(
+        selected_providers=selected_providers,
+        sections_by_provider=sections_by_provider,
+    )
+
+
+def fetch_provider_section_models(
+    *,
+    selected_providers: set[str],
+    codex_sessions_dir: Path,
+    all_limits: bool,
+) -> tuple[SnapshotBundle, tuple[ProviderSection, ...]]:
+    (
+        claude_snapshot,
+        codex_snapshot,
+        gemini_snapshot,
+        claude_status,
+        codex_status,
+        gemini_status,
+    ) = fetch_all_snapshots(
+        selected_providers=selected_providers,
+        codex_sessions_dir=codex_sessions_dir,
+    )
+    bundle = build_snapshot_bundle(
+        selected_providers=selected_providers,
+        claude_snapshot=claude_snapshot,
+        codex_snapshot=codex_snapshot,
+        gemini_snapshot=gemini_snapshot,
+        claude_status=claude_status,
+        codex_status=codex_status,
+        gemini_status=gemini_status,
+    )
+    sections = build_provider_section_models(
+        selected_providers=selected_providers,
+        claude_snapshot=claude_snapshot,
+        codex_snapshot=codex_snapshot,
+        gemini_snapshot=gemini_snapshot,
+        claude_status=claude_status,
+        codex_status=codex_status,
+        gemini_status=gemini_status,
+        all_limits=all_limits,
+    )
+    return bundle, sections
 
 
 def render_full(

@@ -37,6 +37,40 @@ cd ~/Code/model-usage-hud
 
 See `docs/SETUP.md` for provider configuration and `docs/PRIVACY.md` for safe-commit guidance.
 
+## Current Status
+
+As of April 9, 2026, the repo is mid-migration from a single-file CLI/Tk HUD to
+a same-repo multi-entrypoint project.
+
+- `usage-hud` remains the primary, working entrypoint for the existing CLI/Tk HUD.
+- Shared provider view models now exist so the CLI and future app can consume the
+  same normalized data instead of duplicating render logic.
+- `usage-hud-app` now exists as an experimental PySide6 frontend entrypoint.
+- PySide6 is optional and is not required for the CLI path.
+
+If you want to continue app work later, start with:
+
+- [`SPEC.md`](SPEC.md) for the current migration plan and constraints
+- `model_usage_hud/core/` for shared models/builders
+- `model_usage_hud/app/` for the minimal app scaffold
+
+Current app status:
+
+- The minimal app window fetches and renders the shared provider sections.
+- It is intentionally narrow and does not yet include collapsible cards, mute
+  buttons, or persisted UI state.
+- Install Qt only if you want to work on the app path:
+
+```bash
+python3 -m pip install -e '.[gui]'
+usage-hud-app
+```
+
+Recommended next step:
+
+- add collapse state and mute controls to `usage-hud-app`, keeping `usage-hud`
+  unchanged
+
 ## Features
 
 - Single command: `usage-hud` — defaults to `--mini --force`

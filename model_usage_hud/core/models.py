@@ -1,0 +1,90 @@
+"""Typed contracts for the shared view-model layer."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+ProviderName = Literal["claude", "codex", "gemini"]
+TextStyle = Literal[
+    "plain",
+    "bold",
+    "dim",
+    "red",
+    "green",
+    "yellow",
+    "cyan",
+    "white",
+    "orange",
+    "brown",
+    "bold_red",
+    "bold_green",
+    "bold_white",
+]
+
+
+@dataclass(slots=True)
+class NoteLine:
+    """Structured representation of one note/status line."""
+
+    text: str
+    style: TextStyle = "plain"
+
+
+@dataclass(slots=True)
+class MetricRow:
+    """Structured representation of one utilization row."""
+
+    label: str
+    utilization: float | int | None
+    expected_utilization: float | int | None
+    delta: float | int | None
+    display_mode: Literal["pace", "value_only"] = "pace"
+    reset_at: str | int | None = None
+    stale: bool = False
+    prefix: str | None = None
+    prefix_style: TextStyle = "dim"
+    burn_rate_per_hour: float | None = None
+    eta_hours: float | None = None
+
+
+@dataclass(slots=True)
+class ProviderSection:
+    """UI-ready representation of a provider block."""
+
+    provider: ProviderName
+    title: str
+    status: str
+    highest_utilization: float | int | None
+    rows: tuple[MetricRow, ...] = ()
+    notes: tuple[NoteLine, ...] = ()
+    stale: bool = False
+    accent: str = ""
+
+
+@dataclass(slots=True)
+class SnapshotBundle:
+    """Raw snapshot payloads plus provider status strings."""
+
+    generated_at: str
+    selected_providers: tuple[ProviderName, ...]
+    claude_snapshot: dict[str, Any] | None
+    codex_snapshot: dict[str, Any] | None
+    gemini_snapshot: dict[str, Any] | None
+    claude_status: str
+    codex_status: str
+    gemini_status: str
+
+
+@dataclass(slots=True)
+class UiState:
+    """Persisted app-only UI state."""
+
+    collapsed: dict[ProviderName, bool] = field(
+        default_factory=lambda: {
+            "claude": False,
+            "codex": False,
+            "gemini": False,
+        }
+    )
+    window_position: tuple[int, int] = (40, 40)
