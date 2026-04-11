@@ -90,6 +90,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    geometry_explicit = args.geometry is not None
 
     try:
         selected_providers = usage_hud.parse_provider_selection(args.providers)
@@ -109,13 +110,10 @@ def main() -> int:
     usage_hud.DECIMALS = bool(args.decimals)
     usage_hud.SPEEDOMETER_ENABLED = bool(args.speedometer)
 
-    if args.geometry is None:
-        args.geometry = usage_hud.build_default_topmost_geometry(
-            selected_providers=selected_providers,
-            mini=True,
-            font_size=args.font_size,
-            speedometer=args.speedometer,
-        )
+    # When the user didn't pass --geometry we leave it as None and let the
+    # window auto-fit from its grid sizeHint after the first refresh. The
+    # Tk HUD's build_default_topmost_geometry is tuned for text metrics and
+    # doesn't match the PySide grid, so we no longer use it here.
 
     try:
         from PySide6.QtWidgets import QApplication
@@ -140,7 +138,8 @@ def main() -> int:
                     always_on_top=bool(args.always_on_top),
                     frameless=bool(args.frameless),
                     font_size=float(args.font_size),
-                    geometry=str(args.geometry),
+                    geometry=str(args.geometry) if args.geometry is not None else None,
+                    geometry_explicit=geometry_explicit,
                     force=bool(args.force),
                 )
             )
@@ -149,3 +148,7 @@ def main() -> int:
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

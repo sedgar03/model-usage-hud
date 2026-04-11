@@ -20,11 +20,18 @@ from pathlib import Path
 import re
 from typing import Any
 
+if sys.version_info < (3, 10):
+    raise SystemExit(
+        "usage_hud requires Python 3.10+; run ./usage-hud or set "
+        "USAGE_HUD_PYTHON=/path/to/python3.10+."
+    )
+
 from model_usage_hud.core.builders import (
     build_note_line,
     build_provider_section as build_section_model,
     build_provider_view_models,
     build_window_metric_row,
+    pace_bar_runs,
 )
 from model_usage_hud.core.models import MetricRow, NoteLine, ProviderSection, SnapshotBundle
 
@@ -345,67 +352,29 @@ def pct_bar(pct: int, width: int = 16, *, stale: bool = False) -> str:
 
 
 def build_pace_bar(actual_pct: int, expected_pct: int, width: int = 24, *, stale: bool = False) -> str:
-    actual_units = int(round((max(0, min(actual_pct, 100)) / 100.0) * width))
-    expected_units = int(round((max(0, min(expected_pct, 100)) / 100.0) * width))
-    marker_idx = max(0, min(width - 1, expected_units - 1 if expected_units > 0 else 0))
+    """Render a pace bar as ANSI text for the CLI/Tk HUD.
 
-    if BAR_STYLE == "solid":
-        pieces: list[str] = []
-        for i in range(width):
-            pos = i + 1
-            cell_style = "dim"
-            if stale:
-                cell_style = "orange" if pos <= actual_units else "dim"
-            elif pos <= min(actual_units, expected_units):
-                cell_style = "cyan"
-            elif actual_units > expected_units and expected_units < pos <= actual_units:
-                cell_style = "red"
-            elif expected_units > actual_units and actual_units < pos <= expected_units:
-                cell_style = "green"
-            elif pos <= actual_units:
-                cell_style = "cyan"
+    Pacing logic lives in ``core.builders.pace_bar_runs``; this function is a
+    thin BAR_STYLE-aware glyph layer on top of it so CLI and PySide render
+    from the same data.
+    """
 
-            if i == marker_idx:
-                if stale:
-                    marker_style = "orange"
-                else:
-                    marker_style = "red" if actual_units > expected_units else "green"
-                    if abs(actual_units - expected_units) <= 1:
-                        marker_style = "white"
-                pieces.append(ANSI.style("│", marker_style))
-                continue
-
-            pieces.append(ANSI.style("█", cell_style))
-        return "".join(pieces)
-
+    cells = pace_bar_runs(actual_pct, expected_pct, width=width, stale=stale)
     pieces: list[str] = []
-    for i in range(width):
-        pos = i + 1
-        if i == marker_idx:
-            if stale:
-                marker_style = "orange"
-            else:
-                marker_style = "red" if actual_units > expected_units else "green"
-                if abs(actual_units - expected_units) <= 1:
-                    marker_style = "white"
-            pieces.append(ANSI.style("│", marker_style))
+    for cell in cells:
+        if cell.kind == "marker":
+            pieces.append(ANSI.style("│", cell.tone))
             continue
-
-        if stale:
-            if pos <= actual_units:
-                pieces.append(ANSI.style("▓", "orange"))
-            else:
-                pieces.append(ANSI.style("░", "dim"))
-        elif pos <= min(actual_units, expected_units):
-            pieces.append(ANSI.style("▓", "cyan"))
-        elif actual_units > expected_units and expected_units < pos <= actual_units:
-            pieces.append(ANSI.style("▓", "red"))
-        elif expected_units > actual_units and actual_units < pos <= expected_units:
-            pieces.append(ANSI.style("▒", "green"))
-        elif pos <= actual_units:
-            pieces.append(ANSI.style("▓", "cyan"))
-        else:
+        if BAR_STYLE == "solid":
+            pieces.append(ANSI.style("█", cell.tone))
+            continue
+        # Legacy glyph set: ░ for empty, ▒ for the underrun-gap (green), ▓ otherwise.
+        if cell.kind == "empty":
             pieces.append(ANSI.style("░", "dim"))
+        elif cell.tone == "green":
+            pieces.append(ANSI.style("▒", "green"))
+        else:
+            pieces.append(ANSI.style("▓", cell.tone))
     return "".join(pieces)
 
 

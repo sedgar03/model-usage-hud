@@ -19,7 +19,8 @@ When running a single provider (for example `--providers codex`), the topmost HU
 Install as a global command from the repo root:
 
 ```bash
-python3 -m pip install -e .
+# Use a Python 3.10+ interpreter.
+python -m pip install -e .
 ```
 
 Then run anywhere:
@@ -57,19 +58,29 @@ If you want to continue app work later, start with:
 Current app status:
 
 - The minimal app window fetches and renders the shared provider sections.
-- It is intentionally narrow and does not yet include collapsible cards, mute
-  buttons, or persisted UI state.
+- It includes collapsible provider sections, Claude/Codex mute buttons, and
+  persisted collapse/window-position state.
+- It is still intentionally narrow and does not yet include packaging or a
+  polished widget set.
 - Install Qt only if you want to work on the app path:
 
 ```bash
-python3 -m pip install -e '.[gui]'
+python -m pip install -e '.[gui]'
 usage-hud-app
+```
+
+For a repo-local environment:
+
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install -e '.[gui]'
+.venv/bin/usage-hud-app
 ```
 
 Recommended next step:
 
-- add collapse state and mute controls to `usage-hud-app`, keeping `usage-hud`
-  unchanged
+- refine the `usage-hud-app` widget layout and then add macOS app packaging,
+  keeping `usage-hud` unchanged
 
 ## Features
 

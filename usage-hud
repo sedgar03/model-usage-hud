@@ -4,8 +4,36 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PYTHONPATH="${ROOT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
+is_supported_python() {
+  local candidate="$1"
+  command -v "${candidate}" >/dev/null 2>&1 &&
+    "${candidate}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1
+}
+
+if [[ -n "${USAGE_HUD_PYTHON:-}" ]]; then
+  if ! is_supported_python "${USAGE_HUD_PYTHON}"; then
+    echo "usage-hud requires Python 3.10+. USAGE_HUD_PYTHON=${USAGE_HUD_PYTHON} is not supported." >&2
+    exit 1
+  fi
+  PYTHON_BIN="${USAGE_HUD_PYTHON}"
+else
+  PYTHON_BIN=""
+  for candidate in python python3.13 python3.12 python3.11 python3.10 python3; do
+    if is_supported_python "${candidate}"; then
+      PYTHON_BIN="${candidate}"
+      break
+    fi
+  done
+
+  if [[ -z "${PYTHON_BIN}" ]]; then
+    echo "usage-hud requires Python 3.10+, but no supported interpreter was found." >&2
+    echo "Install Python 3.10+ or set USAGE_HUD_PYTHON=/path/to/python." >&2
+    exit 1
+  fi
+fi
+
 # Default to your preferred mode; pass extra flags to override behavior.
-exec python3 "${ROOT_DIR}/usage_hud.py" \
+exec "${PYTHON_BIN}" "${ROOT_DIR}/usage_hud.py" \
   --mini \
   --force \
   --always-on-top \

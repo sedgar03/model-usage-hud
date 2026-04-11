@@ -23,3 +23,11 @@ py-modules = ["usage_hud"]
 
 [tool.setuptools.packages.find]
 include = ["model_usage_hud*"]
+
+[tool.setuptools.package-data]
+"model_usage_hud.app" = [
+    "assets/providers/*.svg",
+    "assets/providers/LICENSE-*",
+    "assets/icons/*.svg",
+    "assets/icons/LICENSE-*",
+]

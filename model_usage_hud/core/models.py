@@ -22,6 +22,22 @@ TextStyle = Literal[
     "bold_white",
 ]
 
+PaceBarCellKind = Literal["filled", "empty", "marker"]
+PaceBarTone = Literal["cyan", "red", "green", "orange", "dim", "white"]
+
+
+@dataclass(slots=True, frozen=True)
+class PaceBarCell:
+    """One cell of a pace bar, rendered identically by CLI ANSI and Qt painters.
+
+    ``kind`` tells a renderer whether the cell is the expected-pace marker, a
+    filled data cell, or empty space. ``tone`` is an abstract palette name the
+    renderer maps to its own color system (ANSI code, Qt ``QColor``, CSS).
+    """
+
+    kind: PaceBarCellKind
+    tone: PaceBarTone
+
 
 @dataclass(slots=True)
 class NoteLine:

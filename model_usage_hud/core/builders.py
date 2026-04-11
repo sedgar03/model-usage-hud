@@ -5,9 +5,75 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Literal
 
-from .models import MetricRow, NoteLine, ProviderName, ProviderSection, TextStyle
+from .models import (
+    MetricRow,
+    NoteLine,
+    PaceBarCell,
+    ProviderName,
+    ProviderSection,
+    TextStyle,
+)
 
 ORDERED_PROVIDERS: tuple[ProviderName, ...] = ("claude", "codex", "gemini")
+
+
+def pace_bar_runs(
+    actual_pct: float | int,
+    expected_pct: float | int,
+    width: int = 24,
+    *,
+    stale: bool = False,
+) -> tuple[PaceBarCell, ...]:
+    """Return a renderer-neutral description of a pace bar.
+
+    Each element is one cell of the bar, left to right. Renderers (CLI ANSI
+    text, Qt paint event, future web UI) decide how to draw ``kind`` and
+    ``tone`` — this function owns the pacing logic so the CLI HUD and the
+    PySide app cannot drift.
+
+    Parameters mirror ``build_pace_bar``: ``actual_pct`` and ``expected_pct``
+    are clamped to [0, 100] before conversion into integer cell counts.
+    """
+
+    actual_units = int(round((max(0.0, min(float(actual_pct), 100.0)) / 100.0) * width))
+    expected_units = int(round((max(0.0, min(float(expected_pct), 100.0)) / 100.0) * width))
+    marker_idx = max(0, min(width - 1, expected_units - 1 if expected_units > 0 else 0))
+
+    cells: list[PaceBarCell] = []
+    for i in range(width):
+        pos = i + 1
+
+        if i == marker_idx:
+            if stale:
+                marker_tone = "orange"
+            elif abs(actual_units - expected_units) <= 1:
+                marker_tone = "white"
+            elif actual_units > expected_units:
+                marker_tone = "red"
+            else:
+                marker_tone = "green"
+            cells.append(PaceBarCell(kind="marker", tone=marker_tone))
+            continue
+
+        if stale:
+            if pos <= actual_units:
+                cells.append(PaceBarCell(kind="filled", tone="orange"))
+            else:
+                cells.append(PaceBarCell(kind="empty", tone="dim"))
+            continue
+
+        if pos <= min(actual_units, expected_units):
+            cells.append(PaceBarCell(kind="filled", tone="cyan"))
+        elif actual_units > expected_units and expected_units < pos <= actual_units:
+            cells.append(PaceBarCell(kind="filled", tone="red"))
+        elif expected_units > actual_units and actual_units < pos <= expected_units:
+            cells.append(PaceBarCell(kind="filled", tone="green"))
+        elif pos <= actual_units:
+            cells.append(PaceBarCell(kind="filled", tone="cyan"))
+        else:
+            cells.append(PaceBarCell(kind="empty", tone="dim"))
+
+    return tuple(cells)
 
 
 def build_note_line(text: str, style: TextStyle = "plain") -> NoteLine:

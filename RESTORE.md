@@ -12,9 +12,9 @@ cd model-usage-hud
 ## Dependencies
 
 ```bash
-pip install -e .
+# Use a Python 3.10+ interpreter.
+python -m pip install -e .
 ```
-
 
 
 

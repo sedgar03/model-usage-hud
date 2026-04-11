@@ -7,7 +7,8 @@ This guide is for first-time setup on a new machine.
 From the repo root:
 
 ```bash
-python3 -m pip install -e .
+# Use a Python 3.10+ interpreter.
+python -m pip install -e .
 ```
 
 Run from this repo during development:
@@ -20,6 +21,14 @@ Run globally after install:
 
 ```bash
 usage-hud
+```
+
+Optional PySide6 app setup in a repo-local environment:
+
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install -e '.[gui]'
+.venv/bin/usage-hud-app
 ```
 
 ## 2) Provider Configuration
