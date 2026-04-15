@@ -104,3 +104,10 @@ class UiState:
         }
     )
     window_position: tuple[int, int] = (40, 40)
+    # ``None`` = follow the ``--font-size`` CLI flag / its default. A
+    # concrete value here means the user zoomed via ⌘+/⌘- and we should
+    # restore that size on next launch, overriding the default.
+    font_size: float | None = None
+    # ``None`` = follow the ``--providers`` CLI flag / default. A concrete
+    # set means the user changed provider visibility from the app top bar.
+    selected_providers: set[ProviderName] | None = None

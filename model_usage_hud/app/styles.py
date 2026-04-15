@@ -8,13 +8,13 @@ COLORS = {
     "bg": "#111315",
     "panel": "#171a1d",
     "border": "#2a2d30",
-    "fg": "#e6edf3",
+    "fg": "#f0f6fc",
     "muted": "#8b949e",
-    "red": "#f85149",
-    "green": "#3fb950",
-    "yellow": "#d29922",
-    "cyan": "#58a6ff",
-    "white": "#e6edf3",
+    "red": "#ff7b72",
+    "green": "#56d364",
+    "yellow": "#e3b341",
+    "cyan": "#79c0ff",
+    "white": "#ffffff",
     "orange": "#d18616",
     "brown": "#b87333",
 }
@@ -64,6 +64,94 @@ QFrame#card {{
     border-radius: 8px;
 }}
 
+QFrame#settingsPanel {{
+    background: {COLORS["bg"]};
+    border-top: 1px solid {COLORS["border"]};
+    border-bottom-left-radius: 8px;
+    border-bottom-right-radius: 8px;
+}}
+
+QPushButton#settingsSelect {{
+    background: {COLORS["bg"]};
+    color: {COLORS["fg"]};
+    border: 1px solid {COLORS["border"]};
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-family: Menlo;
+    text-align: left;
+    min-width: 170px;
+}}
+
+QPushButton#settingsSelect:hover,
+QPushButton#settingsSelect:focus {{
+    border-color: {COLORS["cyan"]};
+    outline: none;
+}}
+
+QFrame#settingsPopup {{
+    background: {COLORS["bg"]};
+    border: 1px solid {COLORS["border"]};
+    border-radius: 4px;
+}}
+
+QScrollArea#settingsPopupScroll,
+QWidget#settingsPopupContent {{
+    background: {COLORS["bg"]};
+    border: none;
+}}
+
+QLabel#settingsPopupHeader {{
+    background: {COLORS["bg"]};
+    color: {COLORS["muted"]};
+    padding: 5px 8px 2px 8px;
+}}
+
+QPushButton#settingsPopupItem {{
+    background: {COLORS["bg"]};
+    color: {COLORS["fg"]};
+    border: none;
+    border-radius: 3px;
+    padding: 4px 8px;
+    text-align: left;
+    font-family: Menlo;
+}}
+
+QPushButton#settingsPopupItem:hover,
+QPushButton#settingsPopupItem:focus {{
+    background: {COLORS["border"]};
+    color: {COLORS["fg"]};
+    outline: none;
+}}
+
+QDoubleSpinBox#settingsSpinBox {{
+    background: {COLORS["bg"]};
+    color: {COLORS["fg"]};
+    border: 1px solid {COLORS["border"]};
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-family: Menlo;
+    min-width: 70px;
+}}
+
+QSlider#settingsSlider::groove:horizontal {{
+    background: {COLORS["border"]};
+    border-radius: 2px;
+    height: 4px;
+}}
+
+QSlider#settingsSlider::sub-page:horizontal {{
+    background: {COLORS["green"]};
+    border-radius: 2px;
+}}
+
+QSlider#settingsSlider::handle:horizontal {{
+    background: {COLORS["fg"]};
+    border: 1px solid {COLORS["border"]};
+    border-radius: 6px;
+    width: 12px;
+    margin: -5px 0;
+}}
+
 QLabel#title {{
     font-weight: 600;
 }}
@@ -95,7 +183,28 @@ QPushButton#controlButton:focus {{
 }}
 
 QPushButton#controlButton:checked {{
-    border-color: {COLORS["yellow"]};
-    color: {COLORS["yellow"]};
+    /* No extra border/tint on checked — the icon swap (e.g. bell ↔
+       bell-slash) already signals state, and a yellow ring around a
+       header control reads as a warning/error. */
+    background: transparent;
+    border-color: transparent;
+    color: {COLORS["fg"]};
+}}
+
+QPushButton#providerToggleButton {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 1px;
+}}
+
+QPushButton#providerToggleButton:hover {{
+    background: {COLORS["panel"]};
+    border-color: {COLORS["border"]};
+}}
+
+QPushButton#providerToggleButton:focus {{
+    border-color: {COLORS["cyan"]};
+    outline: none;
 }}
 """

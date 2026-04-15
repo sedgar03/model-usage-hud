@@ -215,8 +215,8 @@ def fmt_pct(value: int | float) -> str:
 
 def fmt_delta(value: int | float) -> str:
     if DECIMALS:
-        return f"{value:+.1f}"
-    return f"{value:+d}"
+        return f"{value:+.1f}%"
+    return f"{value:+d}%"
 
 
 def parse_iso(ts: str | None) -> datetime | None:
