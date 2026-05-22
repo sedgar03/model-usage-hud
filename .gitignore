@@ -8,6 +8,9 @@ venv/
 .python-version
 .pytest_cache/
 .mypy_cache/
+*.egg-info/
+build/
+dist/
 
 # Environment / secrets
 .env
@@ -16,6 +19,8 @@ venv/
 # Local runtime artifacts
 *.log
 .usage-hud/
+build_images/
+images
 
 # Editor / OS metadata
 .vscode/

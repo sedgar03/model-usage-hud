@@ -9,6 +9,9 @@ from pathlib import Path
 import usage_hud
 
 
+DEFAULT_FONT_SIZE = 10.0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Launch the PySide6 desktop HUD.")
     parser.add_argument(
@@ -77,8 +80,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--font-size",
         type=float,
-        default=7.5,
-        help="Base font size for the app window",
+        default=None,
+        help=(
+            f"Base font size for the app window (default {DEFAULT_FONT_SIZE:.0f}pt, "
+            "⌘+/⌘-/⌘0 to zoom at runtime)"
+        ),
     )
     parser.add_argument(
         "--geometry",
@@ -91,6 +97,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     geometry_explicit = args.geometry is not None
+    font_size_explicit = args.font_size is not None
+    providers_explicit = any(
+        arg == "--providers" or arg.startswith("--providers=")
+        for arg in sys.argv[1:]
+    )
 
     try:
         selected_providers = usage_hud.parse_provider_selection(args.providers)
@@ -103,6 +114,8 @@ def main() -> int:
     if args.interval <= 0:
         print("--interval must be > 0", file=sys.stderr)
         return 2
+    if args.font_size is None:
+        args.font_size = DEFAULT_FONT_SIZE
     if args.font_size <= 0:
         print("--font-size must be > 0", file=sys.stderr)
         return 2
@@ -141,6 +154,8 @@ def main() -> int:
                     geometry=str(args.geometry) if args.geometry is not None else None,
                     geometry_explicit=geometry_explicit,
                     force=bool(args.force),
+                    font_size_explicit=font_size_explicit,
+                    providers_explicit=providers_explicit,
                 )
             )
             window.show()

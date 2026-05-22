@@ -8,13 +8,13 @@ COLORS = {
     "bg": "#111315",
     "panel": "#171a1d",
     "border": "#2a2d30",
-    "fg": "#e6edf3",
+    "fg": "#f0f6fc",
     "muted": "#8b949e",
-    "red": "#f85149",
-    "green": "#3fb950",
-    "yellow": "#d29922",
-    "cyan": "#58a6ff",
-    "white": "#e6edf3",
+    "red": "#ff7b72",
+    "green": "#56d364",
+    "yellow": "#e3b341",
+    "cyan": "#79c0ff",
+    "white": "#ffffff",
     "orange": "#d18616",
     "brown": "#b87333",
 }
@@ -95,7 +95,28 @@ QPushButton#controlButton:focus {{
 }}
 
 QPushButton#controlButton:checked {{
-    border-color: {COLORS["yellow"]};
-    color: {COLORS["yellow"]};
+    /* No extra border/tint on checked — the icon swap (e.g. bell ↔
+       bell-slash) already signals state, and a yellow ring around a
+       header control reads as a warning/error. */
+    background: transparent;
+    border-color: transparent;
+    color: {COLORS["fg"]};
+}}
+
+QPushButton#providerToggleButton {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 1px;
+}}
+
+QPushButton#providerToggleButton:hover {{
+    background: {COLORS["panel"]};
+    border-color: {COLORS["border"]};
+}}
+
+QPushButton#providerToggleButton:focus {{
+    border-color: {COLORS["cyan"]};
+    outline: none;
 }}
 """
