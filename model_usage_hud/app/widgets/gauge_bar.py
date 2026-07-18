@@ -14,8 +14,8 @@ and track thickness) so gauge rows and pace rows line up in the shared grid.
 from __future__ import annotations
 
 import usage_hud
-from PySide6.QtCore import QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QPainter, QPaintEvent
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QWidget
 
 from model_usage_hud.app.styles import COLORS, color_for_style
@@ -28,6 +28,9 @@ class GaugeBarWidget(QWidget):
     WIDGET_WIDTH_PX = 120
     WIDGET_HEIGHT_PX = 14
     TRACK_HEIGHT_PX = 4
+    # Matches PaceBarWidget's dot so the System gauges and the model-use pace
+    # bars read as one system.
+    DOT_DIAMETER_PX = 10
 
     def __init__(self, *, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -89,19 +92,41 @@ class GaugeBarWidget(QWidget):
             rect = self.rect()
             w = float(rect.width())
             h = float(rect.height())
+            # Reserve half a dot on each side so the dot never clips at 0/100 %,
+            # exactly like PaceBarWidget.
+            pad = self.DOT_DIAMETER_PX / 2.0
+            track_w = max(1.0, w - 2.0 * pad)
+            track_x = pad
             track_h = float(self.TRACK_HEIGHT_PX)
             track_y = (h - track_h) / 2.0
             radius = track_h / 2.0
+            frac = self._pct / 100.0
+            color = self._fill_color()
 
+            # 1. Dim background track.
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(COLORS["border"]))
-            painter.drawRoundedRect(QRectF(0.0, track_y, w, track_h), radius, radius)
+            painter.drawRoundedRect(
+                QRectF(track_x, track_y, track_w, track_h), radius, radius
+            )
 
-            fill_w = w * (self._pct / 100.0)
+            # 2. Health-colored fill from 0 to the value.
+            fill_w = track_w * frac
             if fill_w > 0.0:
-                painter.setBrush(self._fill_color())
+                painter.setBrush(color)
                 painter.drawRoundedRect(
-                    QRectF(0.0, track_y, fill_w, track_h), radius, radius
+                    QRectF(track_x, track_y, fill_w, track_h), radius, radius
                 )
+
+            # 3. Status dot at the value position — same color as the fill, with
+            # a thin background ring so it stays crisp over the track.
+            dot_cx = track_x + track_w * frac
+            painter.setPen(QPen(QColor(COLORS["bg"]), 1.5))
+            painter.setBrush(color)
+            painter.drawEllipse(
+                QPointF(dot_cx, h / 2.0),
+                self.DOT_DIAMETER_PX / 2.0,
+                self.DOT_DIAMETER_PX / 2.0,
+            )
         finally:
             painter.end()
