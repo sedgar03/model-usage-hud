@@ -34,6 +34,11 @@ from model_usage_hud.core.builders import (
     pace_bar_runs,
 )
 from model_usage_hud.core.models import MetricRow, NoteLine, ProviderSection, SnapshotBundle
+from model_usage_hud.core.system_metrics import (
+    DEFAULT_DISK_PATH,
+    collect_system_snapshot,
+    fetch_remote_system_snapshot,
+)
 
 
 KEYCHAIN_SERVICE = "Claude Code-credentials"
@@ -100,7 +105,7 @@ def supports_color() -> bool:
 
 ANSI = Ansi(supports_color())
 BAR_STYLE = "legacy"
-PROVIDER_ORDER = ("claude", "codex", "gemini")
+PROVIDER_ORDER = ("claude", "codex", "gemini", "system")
 DEFAULT_TOPMOST_GEOMETRY = "320x130+40+40"
 SINGLE_PROVIDER_TOPMOST_WIDTH_SCALE = 0.65
 
@@ -415,6 +420,10 @@ def provider_badge_lines(provider: str, show_badge: bool = True) -> tuple[str, s
     elif provider == "codex":
         top = ANSI.style("▄▀▀▀▄", "white")
         bottom = ANSI.style("▀▄█▄▀", "white")
+    elif provider == "system":
+        # A small "chip" glyph — a square die with pins — to read as hardware.
+        top = ANSI.style("▛▀▀▜", "green")
+        bottom = ANSI.style("▙▄▄▟", "green")
     else:
         top = ANSI.style("▀█▀█▀", "cyan")
         bottom = ANSI.style("▄█▄█▄", "cyan")
@@ -480,6 +489,11 @@ def resolve_tk_font_size(root: Any, requested_size: float) -> int:
 def estimate_topmost_rows(selected_providers: set[str], mini: bool) -> int:
     provider_count = max(1, len(selected_providers))
     rows = (provider_count * 2) + max(0, provider_count - 1)
+    # The System provider is denser than the 2-line assumption: up to four
+    # gauge rows (CPU/MEM/SWP/DSK) plus a possible memory-pressure note. Add
+    # the extra lines so the topmost window auto-sizes tall enough not to clip.
+    if "system" in selected_providers:
+        rows += 3
     if not mini:
         rows += 2
     return rows
@@ -1113,6 +1127,7 @@ def _provider_title(provider: str) -> str:
         "claude": "Claude",
         "codex": "Codex",
         "gemini": "Gemini",
+        "system": "System",
     }[provider]
 
 
@@ -1121,6 +1136,7 @@ def _provider_accent(provider: str) -> str:
         "claude": "brown",
         "codex": "white",
         "gemini": "cyan",
+        "system": "green",
     }[provider]
 
 
@@ -1177,7 +1193,10 @@ def format_metric_row(row: MetricRow) -> str:
     pct_text = ANSI.style(fmt_pct(row.utilization), "orange" if row.stale else "white")
     if row.expected_utilization is None:
         bar = pct_bar(row.utilization, 14, stale=row.stale)
-        return f"{prefix_text}{ANSI.style(row.label, 'bold')} {pct_text} {bar}{speedo}"
+        detail_text = ""
+        if row.detail:
+            detail_text = " " + ANSI.style(row.detail, row.detail_style)
+        return f"{prefix_text}{ANSI.style(row.label, 'bold')} {pct_text} {bar}{detail_text}{speedo}"
 
     delta = row.delta if row.delta is not None else row.utilization - row.expected_utilization
     delta_text = ANSI.style(fmt_delta(delta), "orange" if row.stale else pace_style(delta))
@@ -1510,6 +1529,193 @@ def render_gemini_mini(
     )
 
 
+# Threshold (GB) below which a swap gauge is worth a row. Idle Macs report a
+# swap file that is allocated but essentially unused; showing a 0% swap gauge
+# is noise, so we only surface swap once it is actually in play.
+SWAP_VISIBLE_GB = 0.05
+
+# Status strings that mean "the snapshot is good" — anything else is treated
+# as a note worth surfacing to the user.
+SYSTEM_OK_STATUS = "Local metrics"
+
+
+# Default tailnet peer name to auto-target for the System provider. The HUD is
+# meant to watch a box you *can't* see in Activity Monitor (a headless server),
+# so it defaults to a peer named like a Mac Studio rather than the local
+# machine. Override with --system-remote / --system-local / --system-name.
+DEFAULT_SYSTEM_REMOTE_HINT = "studio"
+
+
+def _host_label(url: str) -> str:
+    """Short display name for a metrics URL (host without scheme/port/domain)."""
+
+    host = urllib.parse.urlsplit(url if "://" in url else f"http://{url}").hostname
+    if not host:
+        return url
+    # Keep IPs whole; shorten a hostname/FQDN to its first label.
+    if re.match(r"^\d+\.\d+\.\d+\.\d+$", host):
+        return host
+    return host.split(".")[0]
+
+
+def resolve_system_remote(
+    *,
+    remote_flag: str | None,
+    local_flag: bool,
+    name_hint: str = DEFAULT_SYSTEM_REMOTE_HINT,
+) -> tuple[str, str] | None:
+    """Decide where the System provider reads from.
+
+    Precedence: ``--system-local`` (force local) > ``--system-remote URL`` >
+    ``USAGE_HUD_SYSTEM_REMOTE`` env > auto-detected tailnet peer matching
+    ``name_hint`` > local. Returns ``(base_url, label)`` for a remote source,
+    or ``None`` to read the local machine.
+    """
+
+    if local_flag:
+        return None
+    if remote_flag:
+        return remote_flag, _host_label(remote_flag)
+    env = os.environ.get("USAGE_HUD_SYSTEM_REMOTE")
+    if env:
+        return env, _host_label(env)
+    try:
+        from model_usage_hud.server import detect_peer_remote
+
+        return detect_peer_remote(name_hint)
+    except Exception:  # noqa: BLE001 — detection is best-effort
+        return None
+
+
+def fetch_system_snapshot(
+    disk_path: str = DEFAULT_DISK_PATH,
+    remote: tuple[str, str] | None = None,
+) -> dict[str, Any]:
+    """Collect a machine snapshot, locally or from a remote tailnet peer.
+
+    ``remote`` is ``(base_url, label)`` to read another machine's
+    ``usage-hud-serve`` endpoint, or ``None`` for the local machine. The
+    resolved source label is stamped into the snapshot as ``source`` so the
+    renderer can show which box the gauges reflect.
+    """
+
+    if remote is not None:
+        base_url, label = remote
+        snapshot = fetch_remote_system_snapshot(base_url)
+        snapshot["source"] = label
+        return snapshot
+
+    snapshot = collect_system_snapshot(disk_path)
+    snapshot["source"] = "local"
+    return snapshot
+
+
+def _gib(value: float | int | None, digits: int = 0) -> str | None:
+    if value is None:
+        return None
+    return f"{value:.{digits}f}G"
+
+
+def build_system_provider_section(
+    snapshot: dict[str, Any] | None,
+    status_line: str,
+) -> ProviderSection:
+    """Build the ``system`` provider section from a machine snapshot.
+
+    Each row is a plain gauge (no pace target), so the shared renderers draw a
+    fill bar tinted green/yellow/red by :func:`usage_style`. Memory pressure is
+    surfaced as its own note because it is the *authoritative* low-memory
+    signal — it can fire while the "used %" bar still looks calm.
+    """
+
+    rows: list[MetricRow] = []
+    notes: list[NoteLine] = []
+
+    if not snapshot:
+        notes.append(build_note_line(status_line, "yellow"))
+        return build_section_model(
+            provider="system",
+            title=_provider_title("system"),
+            status=status_line,
+            notes=tuple(notes),
+            accent=_provider_accent("system"),
+        )
+
+    cpu = snapshot.get("cpu") or {}
+    mem = snapshot.get("memory") or {}
+    swap = snapshot.get("swap") or {}
+    disk = snapshot.get("disk") or {}
+
+    load1 = cpu.get("load1")
+    rows.append(
+        build_window_metric_row(
+            label="CPU",
+            utilization=cpu.get("used_pct"),
+            expected_utilization=None,
+            detail=f"load {load1:.1f}" if load1 is not None else None,
+        )
+    )
+
+    mem_avail = _gib(mem.get("available_gb"))
+    rows.append(
+        build_window_metric_row(
+            label="MEM",
+            utilization=mem.get("used_pct"),
+            expected_utilization=None,
+            detail=f"{mem_avail} free" if mem_avail else None,
+        )
+    )
+
+    swap_used_gb = swap.get("used_gb")
+    if swap.get("used_pct") is not None and (swap_used_gb or 0) > SWAP_VISIBLE_GB:
+        swap_total = _gib(swap.get("total_gb"))
+        swap_detail = (
+            f"{swap_used_gb:.1f}/{swap_total}" if swap_total else None
+        )
+        rows.append(
+            build_window_metric_row(
+                label="SWP",
+                utilization=swap.get("used_pct"),
+                expected_utilization=None,
+                detail=swap_detail,
+            )
+        )
+
+    disk_free = _gib(disk.get("free_gb"))
+    rows.append(
+        build_window_metric_row(
+            label="DSK",
+            utilization=disk.get("used_pct"),
+            expected_utilization=None,
+            detail=f"{disk_free} free" if disk_free else None,
+        )
+    )
+
+    pressure = mem.get("pressure")
+    if pressure == "warning":
+        notes.append(build_note_line("memory pressure: warning", "yellow"))
+    elif pressure == "critical":
+        notes.append(build_note_line("memory pressure: CRITICAL", "bold_red"))
+
+    if status_line != SYSTEM_OK_STATUS:
+        notes.append(build_note_line(status_line, "yellow"))
+
+    # Label which machine these gauges reflect when it's not this one, so a
+    # laptop HUD pointed at the Studio never reads as the laptop's own stats.
+    source = snapshot.get("source")
+    if source and source != "local":
+        notes.append(build_note_line(f"⌁ {source}", "dim"))
+
+    return build_section_model(
+        provider="system",
+        title=_provider_title("system"),
+        status=status_line,
+        rows=tuple(rows),
+        notes=tuple(notes),
+        accent=_provider_accent("system"),
+    )
+
+
 def parse_provider_selection(raw_value: str) -> set[str]:
     value = str(raw_value or "").strip().lower()
     if value in {"all", "*"}:
@@ -1542,6 +1748,8 @@ def build_provider_sections(
     critical: int,
     all_limits: bool,
     show_badges: bool,
+    system_snapshot: dict[str, Any] | None = None,
+    system_status: str = "Disabled by --providers",
 ) -> list[list[str]]:
     del warn, critical
     return [
@@ -1555,6 +1763,8 @@ def build_provider_sections(
             codex_status=codex_status,
             gemini_status=gemini_status,
             all_limits=all_limits,
+            system_snapshot=system_snapshot,
+            system_status=system_status,
         )
     ]
 
@@ -1568,6 +1778,8 @@ def build_snapshot_bundle(
     claude_status: str,
     codex_status: str,
     gemini_status: str,
+    system_snapshot: dict[str, Any] | None = None,
+    system_status: str = "Disabled by --providers",
 ) -> SnapshotBundle:
     return SnapshotBundle(
         generated_at=datetime.now().astimezone().isoformat(),
@@ -1580,6 +1792,8 @@ def build_snapshot_bundle(
         claude_status=claude_status,
         codex_status=codex_status,
         gemini_status=gemini_status,
+        system_snapshot=system_snapshot,
+        system_status=system_status,
     )
 
 
@@ -1593,6 +1807,8 @@ def build_provider_section_models(
     codex_status: str,
     gemini_status: str,
     all_limits: bool,
+    system_snapshot: dict[str, Any] | None = None,
+    system_status: str = "Disabled by --providers",
 ) -> tuple[ProviderSection, ...]:
     sections_by_provider = {
         "claude": build_claude_provider_section(claude_snapshot, claude_status)
@@ -1603,6 +1819,9 @@ def build_provider_section_models(
         else None,
         "gemini": build_gemini_provider_section(gemini_snapshot, gemini_status)
         if "gemini" in selected_providers
+        else None,
+        "system": build_system_provider_section(system_snapshot, system_status)
+        if "system" in selected_providers
         else None,
     }
     return build_provider_view_models(
@@ -1616,17 +1835,23 @@ def fetch_provider_section_models(
     selected_providers: set[str],
     codex_sessions_dir: Path,
     all_limits: bool,
+    disk_path: str = DEFAULT_DISK_PATH,
+    system_remote: tuple[str, str] | None = None,
 ) -> tuple[SnapshotBundle, tuple[ProviderSection, ...]]:
     (
         claude_snapshot,
         codex_snapshot,
         gemini_snapshot,
+        system_snapshot,
         claude_status,
         codex_status,
         gemini_status,
+        system_status,
     ) = fetch_all_snapshots(
         selected_providers=selected_providers,
         codex_sessions_dir=codex_sessions_dir,
+        disk_path=disk_path,
+        system_remote=system_remote,
     )
     bundle = build_snapshot_bundle(
         selected_providers=selected_providers,
@@ -1636,6 +1861,8 @@ def fetch_provider_section_models(
         claude_status=claude_status,
         codex_status=codex_status,
         gemini_status=gemini_status,
+        system_snapshot=system_snapshot,
+        system_status=system_status,
     )
     sections = build_provider_section_models(
         selected_providers=selected_providers,
@@ -1646,6 +1873,8 @@ def fetch_provider_section_models(
         codex_status=codex_status,
         gemini_status=gemini_status,
         all_limits=all_limits,
+        system_snapshot=system_snapshot,
+        system_status=system_status,
     )
     return bundle, sections
 
@@ -1661,6 +1890,8 @@ def render_full(
     warn: int,
     critical: int,
     all_limits: bool,
+    system_snapshot: dict[str, Any] | None = None,
+    system_status: str = "Disabled by --providers",
 ) -> str:
     now_local = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     lines: list[str] = [ANSI.style(f"UNIFIED USAGE HUD  ({now_local})", "bold")]
@@ -1677,6 +1908,8 @@ def render_full(
         critical=critical,
         all_limits=all_limits,
         show_badges=show_badges,
+        system_snapshot=system_snapshot,
+        system_status=system_status,
     )
     if sections:
         lines.append("")
@@ -1699,6 +1932,8 @@ def render_mini(
     warn: int,
     critical: int,
     all_limits: bool,
+    system_snapshot: dict[str, Any] | None = None,
+    system_status: str = "Disabled by --providers",
 ) -> str:
     lines: list[str] = []
     show_badges = len(selected_providers) > 1
@@ -1714,6 +1949,8 @@ def render_mini(
         critical=critical,
         all_limits=all_limits,
         show_badges=show_badges,
+        system_snapshot=system_snapshot,
+        system_status=system_status,
     )
     for idx, section in enumerate(sections):
         lines.extend(section)
@@ -1789,13 +2026,26 @@ def fetch_claude_cached() -> tuple[dict[str, Any] | None, str]:
 def fetch_all_snapshots(
     selected_providers: set[str],
     codex_sessions_dir: Path,
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, str, str, str]:
+    disk_path: str = DEFAULT_DISK_PATH,
+    system_remote: tuple[str, str] | None = None,
+) -> tuple[
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    str,
+    str,
+    str,
+    str,
+]:
     claude_snapshot: dict[str, Any] | None = None
     codex_snapshot: dict[str, Any] | None = None
     gemini_snapshot: dict[str, Any] | None = None
+    system_snapshot: dict[str, Any] | None = None
     claude_status = "Disabled by --providers"
     codex_status = "Disabled by --providers"
     gemini_status = "Disabled by --providers"
+    system_status = "Disabled by --providers"
 
     if "claude" in selected_providers:
         claude_snapshot, claude_status = fetch_claude_cached()
@@ -1811,13 +2061,26 @@ def fetch_all_snapshots(
     if "gemini" in selected_providers:
         gemini_snapshot, gemini_status = fetch_gemini_cached()
 
+    if "system" in selected_providers:
+        try:
+            system_snapshot = fetch_system_snapshot(disk_path, remote=system_remote)
+            system_status = SYSTEM_OK_STATUS
+        except Exception as exc:  # noqa: BLE001
+            if system_remote is not None:
+                label = system_remote[1]
+                system_status = f"{label} unreachable: start usage-hud-serve on it"
+            else:
+                system_status = str(exc)
+
     return (
         claude_snapshot,
         codex_snapshot,
         gemini_snapshot,
+        system_snapshot,
         claude_status,
         codex_status,
         gemini_status,
+        system_status,
     )
 
 
@@ -1833,6 +2096,8 @@ def render_output(
     claude_status: str,
     codex_status: str,
     gemini_status: str,
+    system_snapshot: dict[str, Any] | None = None,
+    system_status: str = "Disabled by --providers",
 ) -> str:
     if mini:
         return render_mini(
@@ -1846,6 +2111,8 @@ def render_output(
             warn=warn,
             critical=critical,
             all_limits=all_limits,
+            system_snapshot=system_snapshot,
+            system_status=system_status,
         )
 
     return render_full(
@@ -1859,6 +2126,8 @@ def render_output(
         warn=warn,
         critical=critical,
         all_limits=all_limits,
+        system_snapshot=system_snapshot,
+        system_status=system_status,
     )
 
 
@@ -1927,12 +2196,16 @@ def run_topmost_window(args: argparse.Namespace, selected_providers: set[str]) -
             claude_snapshot,
             codex_snapshot,
             gemini_snapshot,
+            system_snapshot,
             claude_status,
             codex_status,
             gemini_status,
+            system_status,
         ) = fetch_all_snapshots(
             selected_providers=selected_providers,
             codex_sessions_dir=args.codex_sessions_dir,
+            disk_path=args.disk_path,
+            system_remote=args.system_remote,
         )
 
         output = render_output(
@@ -1947,6 +2220,8 @@ def run_topmost_window(args: argparse.Namespace, selected_providers: set[str]) -
             claude_status=claude_status,
             codex_status=codex_status,
             gemini_status=gemini_status,
+            system_snapshot=system_snapshot,
+            system_status=system_status,
         )
 
         text.configure(state="normal")
@@ -1979,6 +2254,56 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path.home() / ".codex" / "sessions",
         help="Codex sessions directory (default: ~/.codex/sessions)",
+    )
+    parser.add_argument(
+        "--disk-path",
+        default=DEFAULT_DISK_PATH,
+        help=(
+            "Filesystem path whose free space the System provider gauges "
+            f"(default: {DEFAULT_DISK_PATH})"
+        ),
+    )
+    parser.add_argument(
+        "--system-remote",
+        default=None,
+        metavar="URL",
+        help=(
+            "Read the System provider from a remote usage-hud-serve endpoint "
+            "(e.g. http://stevens-mac-studio:8787). Default: auto-detect a "
+            "tailnet peer named like --system-name."
+        ),
+    )
+    parser.add_argument(
+        "--system-local",
+        action="store_true",
+        help="Force the System provider to read this machine instead of a remote peer",
+    )
+    parser.add_argument(
+        "--system-name",
+        default=DEFAULT_SYSTEM_REMOTE_HINT,
+        help=(
+            "Tailnet hostname substring to auto-target for the System provider "
+            f"(default: {DEFAULT_SYSTEM_REMOTE_HINT!r})"
+        ),
+    )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help=(
+            "Run the tailnet metrics + budget server instead of the HUD "
+            "(see also the usage-hud-serve entrypoint)"
+        ),
+    )
+    parser.add_argument(
+        "--serve-host",
+        default=None,
+        help="Bind address for --serve (default: this machine's Tailscale IP)",
+    )
+    parser.add_argument(
+        "--serve-port",
+        type=int,
+        default=8787,
+        help="Bind port for --serve (default: 8787)",
     )
     parser.add_argument(
         "--interval",
@@ -2111,11 +2436,36 @@ def main() -> int:
 
     args = parse_args()
 
+    if args.serve:
+        # Server mode is independent of the HUD rendering path — no lock, no
+        # provider selection, no window. Import lazily so the HUD path never
+        # pays for it.
+        from model_usage_hud.server import serve
+
+        return serve(
+            host=args.serve_host,
+            port=args.serve_port,
+            disk_path=args.disk_path,
+        )
+
     try:
         selected_providers = parse_provider_selection(args.providers)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+
+    # Resolve the System provider's data source once (auto-detect can shell out
+    # to Tailscale) and stash it on args so the Tk and loop paths share it.
+    # Skip the work entirely when the System section isn't shown.
+    args.system_remote = (
+        resolve_system_remote(
+            remote_flag=args.system_remote,
+            local_flag=args.system_local,
+            name_hint=args.system_name,
+        )
+        if "system" in selected_providers
+        else None
+    )
 
     if args.bar_style == "auto":
         BAR_STYLE = "solid" if args.always_on_top else "legacy"
@@ -2186,12 +2536,16 @@ def main() -> int:
                     claude_snapshot,
                     codex_snapshot,
                     gemini_snapshot,
+                    system_snapshot,
                     claude_status,
                     codex_status,
                     gemini_status,
+                    system_status,
                 ) = fetch_all_snapshots(
                     selected_providers=selected_providers,
                     codex_sessions_dir=args.codex_sessions_dir,
+                    disk_path=args.disk_path,
+                    system_remote=args.system_remote,
                 )
 
                 if args.json:
@@ -2208,6 +2562,10 @@ def main() -> int:
                         "gemini": {
                             "status": gemini_status,
                             "snapshot": gemini_snapshot,
+                        },
+                        "system": {
+                            "status": system_status,
+                            "snapshot": system_snapshot,
                         },
                     }
                     print(json.dumps(payload, indent=2, sort_keys=True))
@@ -2227,6 +2585,8 @@ def main() -> int:
                             claude_status=claude_status,
                             codex_status=codex_status,
                             gemini_status=gemini_status,
+                            system_snapshot=system_snapshot,
+                            system_status=system_status,
                         )
                     )
                     sys.stdout.flush()

@@ -14,7 +14,7 @@ from .models import (
     TextStyle,
 )
 
-ORDERED_PROVIDERS: tuple[ProviderName, ...] = ("claude", "codex", "gemini")
+ORDERED_PROVIDERS: tuple[ProviderName, ...] = ("claude", "codex", "gemini", "system")
 
 
 def pace_bar_runs(
@@ -94,6 +94,8 @@ def build_window_metric_row(
     prefix_style: TextStyle = "dim",
     burn_rate_per_hour: float | None = None,
     eta_hours: float | None = None,
+    detail: str | None = None,
+    detail_style: TextStyle = "dim",
 ) -> MetricRow:
     """Create a structured metric row for a provider section."""
 
@@ -113,6 +115,8 @@ def build_window_metric_row(
         prefix_style=prefix_style,
         burn_rate_per_hour=burn_rate_per_hour,
         eta_hours=eta_hours,
+        detail=detail,
+        detail_style=detail_style,
     )
 
 

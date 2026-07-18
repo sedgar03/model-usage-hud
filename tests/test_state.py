@@ -14,7 +14,7 @@ class UiStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             state = load_ui_state(Path(tmp) / "missing.json")
 
-        self.assertEqual(state.collapsed, {"claude": False, "codex": False, "gemini": False})
+        self.assertEqual(state.collapsed, {"claude": False, "codex": False, "gemini": False, "system": False})
         self.assertEqual(state.window_position, (40, 40))
 
     def test_corrupt_state_uses_defaults(self) -> None:
@@ -23,7 +23,7 @@ class UiStateTests(unittest.TestCase):
             path.write_text("{not json")
             state = load_ui_state(path)
 
-        self.assertEqual(state.collapsed, {"claude": False, "codex": False, "gemini": False})
+        self.assertEqual(state.collapsed, {"claude": False, "codex": False, "gemini": False, "system": False})
         self.assertEqual(state.window_position, (40, 40))
 
     def test_loads_known_fields_and_ignores_bad_values(self) -> None:
@@ -44,7 +44,10 @@ class UiStateTests(unittest.TestCase):
             )
             state = load_ui_state(path)
 
-        self.assertEqual(state.collapsed, {"claude": True, "codex": False, "gemini": False})
+        self.assertEqual(
+            state.collapsed,
+            {"claude": True, "codex": False, "gemini": False, "system": False},
+        )
         self.assertEqual(state.window_position, (120, 240))
 
     def test_saves_round_trippable_state(self) -> None:

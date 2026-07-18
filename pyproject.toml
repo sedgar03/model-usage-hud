@@ -17,6 +17,7 @@ gui = ["PySide6>=6.6"]
 [project.scripts]
 usage-hud = "model_usage_hud.cli:main"
 usage-hud-app = "model_usage_hud.app.main:main"
+usage-hud-serve = "model_usage_hud.server:main"
 
 [tool.setuptools]
 py-modules = ["usage_hud"]

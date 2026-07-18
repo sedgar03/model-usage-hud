@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-ProviderName = Literal["claude", "codex", "gemini"]
+ProviderName = Literal["claude", "codex", "gemini", "system"]
 TextStyle = Literal[
     "plain",
     "bold",
@@ -62,6 +62,12 @@ class MetricRow:
     prefix_style: TextStyle = "dim"
     burn_rate_per_hour: float | None = None
     eta_hours: float | None = None
+    # Free-form trailing context for gauge rows (no pace target), e.g.
+    # "263 GB free" or "load 6.3". Rendered in the detail column with
+    # ``detail_style``. Ignored for pace rows, which build their own detail
+    # from delta/target/speedometer.
+    detail: str | None = None
+    detail_style: TextStyle = "dim"
 
 
 @dataclass(slots=True)
@@ -90,6 +96,8 @@ class SnapshotBundle:
     claude_status: str
     codex_status: str
     gemini_status: str
+    system_snapshot: dict[str, Any] | None = None
+    system_status: str = "Disabled by --providers"
 
 
 @dataclass(slots=True)
@@ -101,6 +109,7 @@ class UiState:
             "claude": False,
             "codex": False,
             "gemini": False,
+            "system": False,
         }
     )
     window_position: tuple[int, int] = (40, 40)

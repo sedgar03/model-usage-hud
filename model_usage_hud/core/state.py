@@ -9,7 +9,7 @@ from typing import Any
 from .models import ProviderName, UiState
 
 DEFAULT_UI_STATE_PATH = Path.home() / ".usage-hud" / "ui-state.json"
-PROVIDER_NAMES: tuple[ProviderName, ...] = ("claude", "codex", "gemini")
+PROVIDER_NAMES: tuple[ProviderName, ...] = ("claude", "codex", "gemini", "system")
 
 
 def _default_collapsed() -> dict[ProviderName, bool]:

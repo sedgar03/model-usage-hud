@@ -21,6 +21,31 @@ def parse_args() -> argparse.Namespace:
         help="Codex sessions directory (default: ~/.codex/sessions)",
     )
     parser.add_argument(
+        "--disk-path",
+        default="/",
+        help="Filesystem the System provider gauges for free space (default: /)",
+    )
+    parser.add_argument(
+        "--system-remote",
+        default=None,
+        metavar="URL",
+        help=(
+            "Read the System provider from a remote usage-hud-serve endpoint "
+            "(e.g. http://stevens-mac-studio:8787). Default: auto-detect a "
+            "tailnet peer named like --system-name."
+        ),
+    )
+    parser.add_argument(
+        "--system-local",
+        action="store_true",
+        help="Force the System provider to read this machine instead of a remote peer",
+    )
+    parser.add_argument(
+        "--system-name",
+        default=usage_hud.DEFAULT_SYSTEM_REMOTE_HINT,
+        help="Tailnet hostname substring to auto-target for the System provider",
+    )
+    parser.add_argument(
         "--interval",
         type=float,
         default=None,
@@ -123,6 +148,15 @@ def main() -> int:
     usage_hud.DECIMALS = bool(args.decimals)
     usage_hud.SPEEDOMETER_ENABLED = bool(args.speedometer)
 
+    # Resolve once at startup (auto-detect can shell out to Tailscale). The app
+    # can toggle System on at runtime, so resolve regardless of the initial
+    # selection rather than gating on it like the one-shot CLI does.
+    system_remote = usage_hud.resolve_system_remote(
+        remote_flag=args.system_remote,
+        local_flag=args.system_local,
+        name_hint=args.system_name,
+    )
+
     # When the user didn't pass --geometry we leave it as None and let the
     # window auto-fit from its grid sizeHint after the first refresh. The
     # Tk HUD's build_default_topmost_geometry is tuned for text metrics and
@@ -156,6 +190,8 @@ def main() -> int:
                     force=bool(args.force),
                     font_size_explicit=font_size_explicit,
                     providers_explicit=providers_explicit,
+                    disk_path=str(args.disk_path),
+                    system_remote=system_remote,
                 )
             )
             window.show()

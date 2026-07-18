@@ -17,6 +17,7 @@ import re
 import usage_hud
 from model_usage_hud.app.icons import provider_icon, provider_pixmap, ui_icon
 from model_usage_hud.app.styles import COLORS, build_stylesheet, color_for_style
+from model_usage_hud.app.widgets.gauge_bar import GaugeBarWidget
 from model_usage_hud.app.widgets.pace_bar import PaceBarWidget
 from model_usage_hud.core.models import (
     MetricRow,
@@ -46,11 +47,12 @@ MUTE_PATHS: dict[ProviderName, Path] = {
     "claude": Path.home() / ".claude" / "mute",
     "codex": Path.home() / ".codex" / "mute",
 }
-PROVIDER_ORDER: tuple[ProviderName, ...] = ("claude", "codex", "gemini")
+PROVIDER_ORDER: tuple[ProviderName, ...] = ("claude", "codex", "gemini", "system")
 PROVIDER_LABELS: dict[ProviderName, str] = {
     "claude": "Claude",
     "codex": "Codex",
     "gemini": "Gemini",
+    "system": "System",
 }
 
 # Grid column indices — one source of truth for layout math.
@@ -96,6 +98,11 @@ class AppConfig:
     # win over the compiled-in default.
     font_size_explicit: bool = False
     providers_explicit: bool = False
+    # Filesystem the System provider gauges for free space (see --disk-path).
+    disk_path: str = "/"
+    # (base_url, label) to read the System provider from a remote tailnet peer,
+    # or None to read the local machine.
+    system_remote: tuple[str, str] | None = None
 
 
 def _style_name_for_metric(row: MetricRow) -> str:
@@ -188,6 +195,8 @@ class RefreshWorker(QRunnable):
                 selected_providers=self.config.selected_providers,
                 codex_sessions_dir=self.config.codex_sessions_dir,
                 all_limits=self.config.all_limits,
+                disk_path=self.config.disk_path,
+                system_remote=self.config.system_remote,
             )
         except Exception as exc:  # noqa: BLE001
             self.signals.failed.emit(str(exc))
@@ -218,9 +227,19 @@ class HudWindow(QWidget):
         self._thread_pool = QThreadPool.globalInstance()
         self._refresh_worker: RefreshWorker | None = None
         self._refresh_in_flight = False
+        # A refresh requested while one is already running. The provider fetch
+        # can be slow (the Claude usage API in particular), and toggling a
+        # provider on mid-fetch must not be silently dropped — otherwise the
+        # newly-shown section never appears. We remember the request and fire
+        # it as soon as the in-flight refresh returns.
+        self._refresh_pending = False
         self._drag_origin = None
         self._ui_state = load_ui_state()
         self._last_sections: tuple[ProviderSection, ...] = ()
+        # Most recent section per provider, kept even while a provider is
+        # hidden. Toggling a provider back on renders its cached section
+        # instantly instead of waiting for the next (possibly slow) fetch.
+        self._section_cache: dict[ProviderName, ProviderSection] = {}
         self._provider_buttons: dict[ProviderName, QPushButton] = {}
         # Cached tuple of (provider, rows, notes) counts from the last render;
         # changes here gate calls to ``adjustSize`` so routine refreshes don't
@@ -521,19 +540,35 @@ class HudWindow(QWidget):
 
     def refresh_now(self) -> None:
         if self._refresh_in_flight:
+            # Don't drop the request — the current fetch was started under an
+            # older provider selection. Queue a follow-up so the latest
+            # selection is fetched as soon as the in-flight one completes.
+            self._refresh_pending = True
             return
         self._refresh_in_flight = True
+        self._refresh_pending = False
         worker = RefreshWorker(self.config)
         worker.signals.succeeded.connect(self._apply_refresh_result)
         worker.signals.failed.connect(self._apply_refresh_error)
         self._refresh_worker = worker
         self._thread_pool.start(worker)
 
+    def _drain_pending_refresh(self) -> None:
+        """Kick a queued refresh after the current one settles."""
+
+        if self._refresh_pending and not self._refresh_in_flight:
+            self._refresh_pending = False
+            QTimer.singleShot(0, self.refresh_now)
+
     def _apply_refresh_result(
         self, bundle: SnapshotBundle, sections: tuple[ProviderSection, ...]
     ) -> None:
         self._refresh_in_flight = False
         self._refresh_worker = None
+        # Cache every returned section (before filtering) so a provider that
+        # is later toggled off and back on can repaint from cache immediately.
+        for section in sections:
+            self._section_cache[section.provider] = section
         sections = tuple(
             section
             for section in sections
@@ -555,6 +590,8 @@ class HudWindow(QWidget):
             self._last_layout_key = layout_key
             if self.config.geometry is None:
                 self.adjustSize()
+
+        self._drain_pending_refresh()
 
     @staticmethod
     def _layout_key(
@@ -584,6 +621,7 @@ class HudWindow(QWidget):
         self._refresh_in_flight = False
         self._refresh_worker = None
         self._show_error(message)
+        self._drain_pending_refresh()
 
     def _show_error(self, message: str) -> None:
         self.error_label.setText(message)
@@ -720,6 +758,14 @@ class HudWindow(QWidget):
             and metric_row.utilization is not None
             and metric_row.expected_utilization is not None
         )
+        # A gauge row is a pace-mode row with a value but no expected target —
+        # an instantaneous level (CPU/mem/disk), not a pace. It gets a fill
+        # bar plus a free-form detail string (e.g. "263G free").
+        has_gauge = (
+            metric_row.display_mode == "pace"
+            and metric_row.utilization is not None
+            and metric_row.expected_utilization is None
+        )
         if has_pace_bar:
             bar = PaceBarWidget(width_cells=PACE_BAR_CELLS)
             bar.set_pace(
@@ -745,6 +791,26 @@ class HudWindow(QWidget):
                 COL_DETAIL,
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             )
+        elif has_gauge:
+            gauge = GaugeBarWidget()
+            gauge.set_value(metric_row.utilization, stale=metric_row.stale)
+            self.grid.addWidget(
+                gauge,
+                row,
+                COL_BAR,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            )
+            if metric_row.detail:
+                detail = QLabel(metric_row.detail)
+                detail.setStyleSheet(
+                    f"color: {color_for_style(metric_row.detail_style)};"
+                )
+                self.grid.addWidget(
+                    detail,
+                    row,
+                    COL_DETAIL,
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                )
         else:
             # Value-only rows (e.g. "Reset  12:34") don't get a pace bar —
             # fold the reset-at text into a span across the bar + detail
@@ -880,16 +946,21 @@ class HudWindow(QWidget):
         self._ui_state.selected_providers = set(selected)
         self._save_current_state()
         self._refresh_provider_buttons()
-        if self._last_sections:
-            visible = tuple(
-                section
-                for section in self._last_sections
-                if section.provider in self.config.selected_providers
-            )
-            self._render_grid(visible)
-            self._last_layout_key = ()
-            if self.config.geometry is None:
-                self.adjustSize()
+        # Repaint immediately from the per-provider cache (in canonical order)
+        # so a provider toggled back on reappears at once instead of waiting
+        # for the next fetch. Providers never fetched yet simply have no cached
+        # section and fill in when the refresh below completes.
+        visible = tuple(
+            self._section_cache[provider]
+            for provider in PROVIDER_ORDER
+            if provider in self.config.selected_providers
+            and provider in self._section_cache
+        )
+        self._last_sections = visible
+        self._render_grid(visible)
+        self._last_layout_key = ()
+        if self.config.geometry is None:
+            self.adjustSize()
         self.refresh_now()
 
     def _refresh_provider_buttons(self) -> None:
