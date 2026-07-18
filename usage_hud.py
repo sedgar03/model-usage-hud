@@ -820,30 +820,68 @@ def parse_codex_snapshot(raw_event: Any) -> CodexSnapshot | None:
     )
 
 
+# Codex rate limits live in the *newest* session(s), near the end of the file
+# (they ride on periodic token-count events). Reading every line of every
+# session is O(total history) — which on a heavy user's machine is tens of GB
+# and takes 30s+. Instead scan only the most-recently-modified sessions, and
+# read each from the tail. Bounds the work to a few megabytes regardless of how
+# much Codex history has accumulated.
+CODEX_MAX_SESSIONS_SCANNED = 12
+CODEX_SESSION_TAIL_BYTES = 5 * 1024 * 1024  # 5 MB
+
+
+def _read_tail_lines(path: Path, tail_bytes: int) -> list[str]:
+    """Return the complete text lines from the last ``tail_bytes`` of a file.
+
+    Reads at most ``tail_bytes`` from the end so a multi-GB rollout costs the
+    same as a small one. The first (likely partial) line is dropped when we
+    seek into the middle of the file.
+    """
+
+    with path.open("rb") as handle:
+        size = handle.seek(0, os.SEEK_END)
+        start = max(0, size - tail_bytes)
+        handle.seek(start)
+        if start > 0:
+            handle.readline()  # discard the partial line we landed inside
+        data = handle.read()
+    return data.decode("utf-8", errors="replace").splitlines()
+
+
 def load_latest_codex_snapshots(sessions_dir: Path) -> dict[str, CodexSnapshot]:
     latest: dict[str, CodexSnapshot] = {}
     if not sessions_dir.exists():
         return latest
 
+    # Newest sessions first (by mtime); only the most recent carry current
+    # rate-limit state.
+    sessions: list[tuple[float, Path]] = []
     for session_log in sessions_dir.rglob("*.jsonl"):
         try:
-            with session_log.open("r", encoding="utf-8", errors="replace") as handle:
-                for raw_line in handle:
-                    line = raw_line.strip()
-                    if not line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    snapshot = parse_codex_snapshot(event)
-                    if snapshot is None:
-                        continue
-                    current = latest.get(snapshot.limit_id)
-                    if current is None or snapshot.timestamp > current.timestamp:
-                        latest[snapshot.limit_id] = snapshot
+            sessions.append((session_log.stat().st_mtime, session_log))
         except OSError:
             continue
+    sessions.sort(key=lambda item: item[0], reverse=True)
+
+    for _mtime, session_log in sessions[:CODEX_MAX_SESSIONS_SCANNED]:
+        try:
+            lines = _read_tail_lines(session_log, CODEX_SESSION_TAIL_BYTES)
+        except OSError:
+            continue
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            snapshot = parse_codex_snapshot(event)
+            if snapshot is None:
+                continue
+            current = latest.get(snapshot.limit_id)
+            if current is None or snapshot.timestamp > current.timestamp:
+                latest[snapshot.limit_id] = snapshot
     return latest
 
 
