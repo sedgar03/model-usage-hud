@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+import usage_hud
 from model_usage_hud.core import system_metrics as sm
 
 
@@ -111,6 +112,62 @@ class BudgetAdviceTests(unittest.TestCase):
         budget = sm.derive_budget({})
         self.assertIn("advice", budget)
         self.assertIsNone(budget["cpu"]["free_cores"])
+
+
+class SystemSectionTests(unittest.TestCase):
+    """The merged CPU + MEM section, with MEM colored by memory pressure."""
+
+    def _section(self, snapshot):
+        return usage_hud.build_system_provider_section(
+            snapshot, usage_hud.SYSTEM_OK_STATUS
+        )
+
+    def test_only_cpu_and_mem_rows(self) -> None:
+        snap = {
+            "cpu": {"used_pct": 30, "load1": 3.0, "ncpu": 10},
+            "memory": {"used_pct": 40, "available_gb": 100.0, "pressure": "normal"},
+            "swap": {"used_pct": 50, "used_gb": 5.0, "total_gb": 10.0},
+            "disk": {"used_pct": 60, "free_gb": 300.0},
+            "source": "local",
+        }
+        labels = [r.label for r in self._section(snap).rows]
+        self.assertEqual(labels, ["CPU", "MEM"])  # no SWP, no DSK
+
+    def test_mem_green_when_pressure_normal_even_if_full(self) -> None:
+        snap = {
+            "cpu": {"used_pct": 10, "load1": 1.0, "ncpu": 10},
+            "memory": {"used_pct": 88, "available_gb": 20.0, "pressure": "normal"},
+            "swap": {"used_pct": 90, "used_gb": 9.0, "total_gb": 10.0},
+        }
+        mem = next(r for r in self._section(snap).rows if r.label == "MEM")
+        self.assertEqual(mem.gauge_style, "green")
+        # Residual swap must NOT leak into the detail while healthy.
+        self.assertNotIn("swap", mem.detail or "")
+
+    def test_mem_yellow_and_swap_shown_under_warning(self) -> None:
+        snap = {
+            "cpu": {"used_pct": 10, "load1": 1.0, "ncpu": 10},
+            "memory": {"used_pct": 82, "available_gb": 4.0, "pressure": "warning"},
+            "swap": {"used_pct": 70, "used_gb": 9.0, "total_gb": 12.0},
+        }
+        mem = next(r for r in self._section(snap).rows if r.label == "MEM")
+        self.assertEqual(mem.gauge_style, "yellow")
+        self.assertIn("swap", mem.detail or "")
+
+    def test_full_but_normal_pressure_hits_safety_net(self) -> None:
+        snap = {
+            "cpu": {"used_pct": 10, "load1": 1.0, "ncpu": 10},
+            "memory": {"used_pct": 97, "available_gb": 1.0, "pressure": "normal"},
+            "swap": {"used_pct": 0, "used_gb": 0.0, "total_gb": 0.0},
+        }
+        mem = next(r for r in self._section(snap).rows if r.label == "MEM")
+        self.assertEqual(mem.gauge_style, "yellow")  # not green at >=95%
+
+    def test_pressure_gauge_style_mapping(self) -> None:
+        self.assertEqual(usage_hud._pressure_gauge_style("normal"), "green")
+        self.assertEqual(usage_hud._pressure_gauge_style("warning"), "yellow")
+        self.assertEqual(usage_hud._pressure_gauge_style("critical"), "bold_red")
+        self.assertIsNone(usage_hud._pressure_gauge_style(None))
 
 
 class SnapshotShapeTests(unittest.TestCase):

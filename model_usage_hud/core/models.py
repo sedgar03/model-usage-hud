@@ -68,6 +68,11 @@ class MetricRow:
     # from delta/target/speedometer.
     detail: str | None = None
     detail_style: TextStyle = "dim"
+    # Optional fill-color override for gauge rows. ``None`` colors the bar by
+    # its own value (usage_style); a concrete style lets a caller drive the
+    # color from a different health signal — e.g. MEM tinted by macOS memory
+    # pressure rather than by used-%.
+    gauge_style: TextStyle | None = None
 
 
 @dataclass(slots=True)

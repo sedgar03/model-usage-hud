@@ -33,7 +33,13 @@ from model_usage_hud.core.builders import (
     build_window_metric_row,
     pace_bar_runs,
 )
-from model_usage_hud.core.models import MetricRow, NoteLine, ProviderSection, SnapshotBundle
+from model_usage_hud.core.models import (
+    MetricRow,
+    NoteLine,
+    ProviderSection,
+    SnapshotBundle,
+    TextStyle,
+)
 from model_usage_hud.core.system_metrics import (
     DEFAULT_DISK_PATH,
     collect_system_snapshot,
@@ -343,7 +349,13 @@ def pace_style(delta: int) -> str:
     return "cyan"
 
 
-def pct_bar(pct: int, width: int = 16, *, stale: bool = False) -> str:
+def pct_bar(
+    pct: int,
+    width: int = 16,
+    *,
+    stale: bool = False,
+    fill_style: str | None = None,
+) -> str:
     pct = max(0, min(pct, 100))
     filled = int(round((pct / 100.0) * width))
     if BAR_STYLE == "solid":
@@ -352,8 +364,10 @@ def pct_bar(pct: int, width: int = 16, *, stale: bool = False) -> str:
     else:
         fill = "▓" * filled
         empty = "░" * (width - filled)
-    fill_style = "orange" if stale else usage_style(pct)
-    return ANSI.style(fill, fill_style) + ANSI.style(empty, "dim")
+    # ``fill_style`` lets a caller color the bar by an external health signal
+    # (e.g. memory pressure) instead of the value's own usage_style bucket.
+    resolved_style = "orange" if stale else (fill_style or usage_style(pct))
+    return ANSI.style(fill, resolved_style) + ANSI.style(empty, "dim")
 
 
 def build_pace_bar(actual_pct: int, expected_pct: int, width: int = 24, *, stale: bool = False) -> str:
@@ -489,11 +503,11 @@ def resolve_tk_font_size(root: Any, requested_size: float) -> int:
 def estimate_topmost_rows(selected_providers: set[str], mini: bool) -> int:
     provider_count = max(1, len(selected_providers))
     rows = (provider_count * 2) + max(0, provider_count - 1)
-    # The System provider is denser than the 2-line assumption: up to four
-    # gauge rows (CPU/MEM/SWP/DSK) plus a possible memory-pressure note. Add
-    # the extra lines so the topmost window auto-sizes tall enough not to clip.
+    # The System provider is two gauge rows (CPU, MEM) — same as the 2-line
+    # baseline — plus an occasional source/status note when it reads a remote
+    # peer. Add one line for that note so the topmost window doesn't clip it.
     if "system" in selected_providers:
-        rows += 3
+        rows += 1
     if not mini:
         rows += 2
     return rows
@@ -1192,7 +1206,7 @@ def format_metric_row(row: MetricRow) -> str:
 
     pct_text = ANSI.style(fmt_pct(row.utilization), "orange" if row.stale else "white")
     if row.expected_utilization is None:
-        bar = pct_bar(row.utilization, 14, stale=row.stale)
+        bar = pct_bar(row.utilization, 14, stale=row.stale, fill_style=row.gauge_style)
         detail_text = ""
         if row.detail:
             detail_text = " " + ANSI.style(row.detail, row.detail_style)
@@ -1616,16 +1630,36 @@ def _gib(value: float | int | None, digits: int = 0) -> str | None:
     return f"{value:.{digits}f}G"
 
 
+def _pressure_gauge_style(pressure: str | None) -> TextStyle | None:
+    """Map macOS memory pressure to a gauge fill color.
+
+    This is what makes MEM a *health* gauge: the bar's color comes from the
+    kernel's own verdict, not from how full RAM looks. ``None`` (pressure
+    unknown, e.g. off-macOS) lets the renderer fall back to the value's own
+    usage_style bucket.
+    """
+
+    return {
+        "normal": "green",
+        "warning": "yellow",
+        "critical": "bold_red",
+    }.get(pressure or "")
+
+
 def build_system_provider_section(
     snapshot: dict[str, Any] | None,
     status_line: str,
 ) -> ProviderSection:
-    """Build the ``system`` provider section from a machine snapshot.
+    """Build the ``system`` provider section: two health gauges, CPU and MEM.
 
-    Each row is a plain gauge (no pace target), so the shared renderers draw a
-    fill bar tinted green/yellow/red by :func:`usage_style`. Memory pressure is
-    surfaced as its own note because it is the *authoritative* low-memory
-    signal — it can fire while the "used %" bar still looks calm.
+    CPU is a plain busy-% gauge colored by :func:`usage_style`. MEM is the
+    merged memory gauge: its fill is RAM-in-use, but its *color* comes from
+    macOS memory pressure (:func:`_pressure_gauge_style`) — the authoritative
+    low-memory verdict, which already accounts for swap. So "MEM green" means
+    the kernel reports normal pressure even if RAM looks full or some swap is
+    residual. Swap is folded into the MEM detail only when pressure is elevated
+    (i.e. when it is actually diagnostic). Disk is intentionally not shown here;
+    it stays in the snapshot/``/metrics`` and the budget safety-net.
     """
 
     rows: list[MetricRow] = []
@@ -1644,7 +1678,6 @@ def build_system_provider_section(
     cpu = snapshot.get("cpu") or {}
     mem = snapshot.get("memory") or {}
     swap = snapshot.get("swap") or {}
-    disk = snapshot.get("disk") or {}
 
     load1 = cpu.get("load1")
     rows.append(
@@ -1656,46 +1689,36 @@ def build_system_provider_section(
         )
     )
 
+    pressure = mem.get("pressure")
+    mem_pct = mem.get("used_pct")
+    mem_style = _pressure_gauge_style(pressure)
+    # Safety net for the rare case where pressure lags a nearly-full machine:
+    # never paint a >=95% MEM bar green.
+    if mem_style == "green" and mem_pct is not None and mem_pct >= 95:
+        mem_style = "yellow"
+
     mem_avail = _gib(mem.get("available_gb"))
+    mem_detail = f"{mem_avail} free" if mem_avail else None
+    swap_used_gb = swap.get("used_gb")
+    # Swap only earns detail space when memory is actually strained — on a
+    # healthy machine it's usually harmless residue, and showing it there reads
+    # as a false alarm. Under warning/critical it's the "why", so surface it.
+    if (
+        pressure in ("warning", "critical")
+        and (swap_used_gb or 0) > SWAP_VISIBLE_GB
+        and mem_detail is not None
+    ):
+        mem_detail += f" · {swap_used_gb:.0f}G swap"
+
     rows.append(
         build_window_metric_row(
             label="MEM",
-            utilization=mem.get("used_pct"),
+            utilization=mem_pct,
             expected_utilization=None,
-            detail=f"{mem_avail} free" if mem_avail else None,
+            detail=mem_detail,
+            gauge_style=mem_style,
         )
     )
-
-    swap_used_gb = swap.get("used_gb")
-    if swap.get("used_pct") is not None and (swap_used_gb or 0) > SWAP_VISIBLE_GB:
-        swap_total = _gib(swap.get("total_gb"))
-        swap_detail = (
-            f"{swap_used_gb:.1f}/{swap_total}" if swap_total else None
-        )
-        rows.append(
-            build_window_metric_row(
-                label="SWP",
-                utilization=swap.get("used_pct"),
-                expected_utilization=None,
-                detail=swap_detail,
-            )
-        )
-
-    disk_free = _gib(disk.get("free_gb"))
-    rows.append(
-        build_window_metric_row(
-            label="DSK",
-            utilization=disk.get("used_pct"),
-            expected_utilization=None,
-            detail=f"{disk_free} free" if disk_free else None,
-        )
-    )
-
-    pressure = mem.get("pressure")
-    if pressure == "warning":
-        notes.append(build_note_line("memory pressure: warning", "yellow"))
-    elif pressure == "critical":
-        notes.append(build_note_line("memory pressure: CRITICAL", "bold_red"))
 
     if status_line != SYSTEM_OK_STATUS:
         notes.append(build_note_line(status_line, "yellow"))

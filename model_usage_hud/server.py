@@ -320,18 +320,18 @@ WEB_HUD_HTML = """<!doctype html>
   <h1>System HUD</h1>
   <div class="meta" id="meta">connecting…</div>
   <div id="gauges"></div>
-  <div class="pressure" id="pressure"></div>
   <div class="advice" id="advice"></div>
 </div>
 <script>
 const POLL_MS = 5000;
-function tone(pct) { if (pct >= 95) return 'var(--red)'; if (pct >= 80) return 'var(--yellow)'; return 'var(--green)'; }
-function gauge(label, pct, detail) {
+function tone(pct) { if (pct == null) return 'var(--border)'; if (pct >= 95) return 'var(--red)'; if (pct >= 80) return 'var(--yellow)'; return 'var(--green)'; }
+function pressureColor(p) { return p === 'critical' ? 'var(--red)' : p === 'warning' ? 'var(--yellow)' : 'var(--green)'; }
+function gauge(label, pct, detail, color) {
   const p = (pct == null) ? 0 : Math.max(0, Math.min(100, pct));
   const shown = (pct == null) ? '--' : Math.round(pct) + '%';
   return `<div class="row"><span class="label">${label}</span>`
     + `<span class="value">${shown}</span>`
-    + `<span class="track"><span class="fill" style="width:${p}%;background:${tone(p)}"></span></span></div>`
+    + `<span class="track"><span class="fill" style="width:${p}%;background:${color || tone(p)}"></span></span></div>`
     + (detail ? `<div class="detail">${detail}</div>` : '');
 }
 async function tick() {
@@ -341,20 +341,19 @@ async function tick() {
       fetch('/budget').then(r => r.json()),
     ]);
     const s = m.system || {};
-    const cpu = s.cpu || {}, mem = s.memory || {}, swp = s.swap || {}, dsk = s.disk || {};
+    const cpu = s.cpu || {}, mem = s.memory || {}, swp = s.swap || {};
     let html = '';
     html += gauge('CPU', cpu.used_pct, cpu.load1 != null ? ('load ' + cpu.load1) : '');
-    html += gauge('MEM', mem.used_pct, mem.available_gb != null ? (mem.available_gb + 'G free') : '');
-    if (swp.used_pct != null && (swp.used_gb || 0) > 0.05)
-      html += gauge('SWP', swp.used_pct, (swp.used_gb + '/' + swp.total_gb + 'G'));
-    html += gauge('DSK', dsk.used_pct, dsk.free_gb != null ? (dsk.free_gb + 'G free') : '');
-    document.getElementById('gauges').innerHTML = html;
-
+    // MEM: fill = used %, color = memory pressure (the health verdict). Swap
+    // folds into the detail only when pressure is actually elevated.
     const pr = mem.pressure;
-    const prEl = document.getElementById('pressure');
-    if (pr && pr !== 'normal') {
-      prEl.innerHTML = `<span class="badge ${pr === 'critical' ? 'crit' : 'warn'}">memory pressure: ${pr}</span>`;
-    } else { prEl.innerHTML = ''; }
+    let memDetail = mem.available_gb != null ? (mem.available_gb + 'G free') : '';
+    if ((pr === 'warning' || pr === 'critical') && (swp.used_gb || 0) > 0.05)
+      memDetail += ' · ' + Math.round(swp.used_gb) + 'G swap';
+    let memColor = pressureColor(pr);
+    if (pr === 'normal' && mem.used_pct != null && mem.used_pct >= 95) memColor = 'var(--yellow)';
+    html += gauge('MEM', mem.used_pct, memDetail, memColor);
+    document.getElementById('gauges').innerHTML = html;
 
     const adv = b.advice || {};
     document.getElementById('advice').innerHTML =
@@ -366,7 +365,7 @@ async function tick() {
     document.getElementById('meta').textContent = 'updated ' + t.toLocaleTimeString();
     document.body.classList.remove('stale');
   } catch (e) {
-    document.getElementById('meta').textContent = 'connection lost — retrying…';
+    document.getElementById('meta').textContent = 'connection lost, retrying…';
     document.body.classList.add('stale');
   }
 }

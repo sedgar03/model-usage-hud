@@ -96,6 +96,7 @@ def build_window_metric_row(
     eta_hours: float | None = None,
     detail: str | None = None,
     detail_style: TextStyle = "dim",
+    gauge_style: TextStyle | None = None,
 ) -> MetricRow:
     """Create a structured metric row for a provider section."""
 
@@ -117,6 +118,7 @@ def build_window_metric_row(
         eta_hours=eta_hours,
         detail=detail,
         detail_style=detail_style,
+        gauge_style=gauge_style,
     )
 
 

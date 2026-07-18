@@ -793,7 +793,11 @@ class HudWindow(QWidget):
             )
         elif has_gauge:
             gauge = GaugeBarWidget()
-            gauge.set_value(metric_row.utilization, stale=metric_row.stale)
+            gauge.set_value(
+                metric_row.utilization,
+                stale=metric_row.stale,
+                style=metric_row.gauge_style,
+            )
             self.grid.addWidget(
                 gauge,
                 row,

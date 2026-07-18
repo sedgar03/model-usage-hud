@@ -189,21 +189,24 @@ Notable options:
 ## System monitoring & tailnet server
 
 The `system` provider turns the HUD into a lightweight machine monitor. It
-appears as a fourth section (a green chip icon) with gauge bars for:
+appears as a fourth section (a green chip icon) with two health gauges:
 
-- **CPU** — instantaneous busy % (Mach tick delta), with the 1-minute load
-  average in the detail column
-- **MEM** — memory used % (≈ Activity Monitor's "Memory Used"), with available
-  GB and a **memory pressure** note (`warning` / `critical`) driven by the
-  kernel's own `kern.memorystatus_vm_pressure_level` — the authoritative
-  low-memory signal, which can fire before the used-% bar looks alarming
-- **SWP** — swap used % (only shown once swap is actually in use)
-- **DSK** — disk used % for `--disk-path` (default `/`), with free GB
+- **CPU** — instantaneous busy % (Mach tick delta), tinted green → yellow
+  (≥80%) → red (≥95%), with the 1-minute load average in the detail column.
+- **MEM** — the merged memory gauge. The bar *fill* is RAM in use, but its
+  *color* comes from macOS **memory pressure**
+  (`kern.memorystatus_vm_pressure_level`: normal → green, warning → yellow,
+  critical → red), not from used-%. Pressure is the authoritative low-memory
+  verdict and already accounts for swap, so **MEM green = healthy** even when
+  RAM looks full or some swap is residual. The detail shows available GB; swap
+  is folded in (`… · 9G swap`) only when pressure is elevated, i.e. when it is
+  actually the reason. A ≥95%-full safety net keeps a nearly-full bar off green.
 
-Gauges tint green → yellow (≥80%) → red (≥95%) so redlining is obvious in both
-the terminal/Tk HUD and the desktop app. No third-party dependencies: metrics
-come from `sysctl`, `vm_stat`, the Mach `host_statistics` syscall, and
-`shutil.disk_usage`. macOS-only fields degrade to blanks on other platforms.
+Reading it at a glance: **both bars green = healthy.** Disk is intentionally not
+shown here (you can watch that elsewhere); it stays in `/metrics` and the budget
+safety-net. No third-party dependencies: metrics come from `sysctl`, `vm_stat`,
+the Mach `host_statistics` syscall, and `shutil.disk_usage`. macOS-only fields
+degrade to blanks on other platforms.
 
 ### Which machine it watches
 

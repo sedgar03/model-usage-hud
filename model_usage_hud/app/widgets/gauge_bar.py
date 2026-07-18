@@ -33,23 +33,36 @@ class GaugeBarWidget(QWidget):
         super().__init__(parent)
         self._pct: float | None = None
         self._stale = False
+        self._style: str | None = None
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
-    def set_value(self, pct: float | int | None, *, stale: bool = False) -> None:
-        """Update the gauge. ``None`` clears the fill."""
+    def set_value(
+        self,
+        pct: float | int | None,
+        *,
+        stale: bool = False,
+        style: str | None = None,
+    ) -> None:
+        """Update the gauge. ``None`` clears the fill.
+
+        ``style`` overrides the fill color with a named style (e.g. a memory
+        gauge tinted by pressure); ``None`` colors the bar by its own value.
+        """
 
         if pct is None:
             if self._pct is not None:
                 self._pct = None
                 self._stale = False
+                self._style = None
                 self.update()
             return
         value = max(0.0, min(100.0, float(pct)))
-        if self._pct == value and self._stale == stale:
+        if self._pct == value and self._stale == stale and self._style == style:
             return
         self._pct = value
         self._stale = stale
+        self._style = style
         self.update()
 
     def sizeHint(self) -> QSize:  # type: ignore[override]
@@ -62,8 +75,9 @@ class GaugeBarWidget(QWidget):
         if self._stale:
             return QColor(COLORS["orange"])
         assert self._pct is not None
-        # Reuse the CLI's threshold mapping so both HUDs redline together.
-        style = usage_hud.usage_style(int(round(self._pct)))
+        # An explicit style (e.g. memory pressure) wins; otherwise reuse the
+        # CLI's value-threshold mapping so both HUDs redline together.
+        style = self._style or usage_hud.usage_style(int(round(self._pct)))
         return QColor(color_for_style(style))
 
     def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]
