@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-ProviderName = Literal["claude", "codex", "gemini", "system"]
+ProviderName = Literal["claude", "codex", "gemini", "kimi", "system"]
 TextStyle = Literal[
     "plain",
     "bold",
@@ -101,6 +101,8 @@ class SnapshotBundle:
     claude_status: str
     codex_status: str
     gemini_status: str
+    kimi_snapshot: dict[str, Any] | None = None
+    kimi_status: str = "Disabled by --providers"
     system_snapshot: dict[str, Any] | None = None
     system_status: str = "Disabled by --providers"
 
@@ -114,6 +116,7 @@ class UiState:
             "claude": False,
             "codex": False,
             "gemini": False,
+            "kimi": False,
             "system": False,
         }
     )

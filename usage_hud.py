@@ -111,7 +111,7 @@ def supports_color() -> bool:
 
 ANSI = Ansi(supports_color())
 BAR_STYLE = "legacy"
-PROVIDER_ORDER = ("claude", "codex", "gemini", "system")
+PROVIDER_ORDER = ("claude", "codex", "gemini", "kimi", "system")
 DEFAULT_TOPMOST_GEOMETRY = "320x130+40+40"
 SINGLE_PROVIDER_TOPMOST_WIDTH_SCALE = 0.65
 
@@ -434,6 +434,10 @@ def provider_badge_lines(provider: str, show_badge: bool = True) -> tuple[str, s
     elif provider == "codex":
         top = ANSI.style("▄▀▀▀▄", "white")
         bottom = ANSI.style("▀▄█▄▀", "white")
+    elif provider == "kimi":
+        # A crescent-moon-ish glyph for Moonshot's Kimi.
+        top = ANSI.style("◗▀▀▖", "orange")
+        bottom = ANSI.style("◗▄▄▘", "orange")
     elif provider == "system":
         # A small "chip" glyph — a square die with pins — to read as hardware.
         top = ANSI.style("▛▀▀▜", "green")
@@ -1179,6 +1183,7 @@ def _provider_title(provider: str) -> str:
         "claude": "Claude",
         "codex": "Codex",
         "gemini": "Gemini",
+        "kimi": "Kimi",
         "system": "System",
     }[provider]
 
@@ -1188,6 +1193,7 @@ def _provider_accent(provider: str) -> str:
         "claude": "brown",
         "codex": "white",
         "gemini": "cyan",
+        "kimi": "orange",
         "system": "green",
     }[provider]
 
@@ -1581,6 +1587,249 @@ def render_gemini_mini(
     )
 
 
+# ---------------------------------------------------------------------------
+# Kimi (Moonshot kimi-code) usage — OAuth token from the kimi-code CLI, same
+# model as Claude. Data comes from https://api.kimi.com/coding/v1/usages.
+# ---------------------------------------------------------------------------
+
+KIMI_CREDENTIALS_PATH = Path.home() / ".kimi-code" / "credentials" / "kimi-code.json"
+KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages"
+# The top-level quota states no duration; its resetTime sits ~7 days out, so we
+# treat it as a 7-day window for the pace marker (mirrors Claude's week window).
+KIMI_WEEKLY_WINDOW = timedelta(days=7)
+_KIMI_TIME_UNIT_MINUTES = {
+    "TIME_UNIT_SECOND": 1.0 / 60.0,
+    "TIME_UNIT_MINUTE": 1.0,
+    "TIME_UNIT_HOUR": 60.0,
+    "TIME_UNIT_DAY": 1440.0,
+}
+
+
+def _kimi_read_token() -> str | None:
+    """Read the current OAuth access token kimi-code maintains on disk."""
+
+    try:
+        data = json.loads(KIMI_CREDENTIALS_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    token = data.get("access_token") if isinstance(data, dict) else None
+    return token if isinstance(token, str) and token else None
+
+
+def _kimi_num(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _kimi_window_minutes(window: Any) -> int | None:
+    if not isinstance(window, dict):
+        return None
+    duration = _kimi_num(window.get("duration"))
+    factor = _KIMI_TIME_UNIT_MINUTES.get(window.get("timeUnit"))
+    if duration is None or factor is None:
+        return None
+    return int(round(duration * factor))
+
+
+def _kimi_window_from_detail(detail: Any) -> dict[str, Any] | None:
+    """Turn a Kimi ``{limit, remaining, resetTime}`` block into a HUD window.
+
+    Utilization is ``(limit - remaining) / limit`` — the values arrive as
+    strings, so they're coerced first.
+    """
+
+    if not isinstance(detail, dict):
+        return None
+    limit = _kimi_num(detail.get("limit"))
+    remaining = _kimi_num(detail.get("remaining"))
+    utilization: float | int | None = None
+    if limit is not None and limit > 0 and remaining is not None:
+        utilization = clamp_pct((limit - remaining) / limit * 100.0)
+    return {"utilization": utilization, "resets_at": detail.get("resetTime")}
+
+
+def normalize_kimi_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize ``/usages`` into ``{five_hour, weekly, membership}``.
+
+    ``weekly`` is the top-level quota; ``five_hour`` is the shortest windowed
+    entry in ``limits`` (a 300-minute window on the Basic tier).
+    """
+
+    weekly = _kimi_window_from_detail(payload.get("usage"))
+    five: dict[str, Any] | None = None
+    limits = payload.get("limits")
+    if isinstance(limits, list):
+        for item in limits:
+            if not isinstance(item, dict):
+                continue
+            window = _kimi_window_from_detail(item.get("detail"))
+            if window is None:
+                continue
+            window["window_minutes"] = _kimi_window_minutes(item.get("window"))
+            if five is None or (
+                window["window_minutes"] is not None
+                and (five.get("window_minutes") or 10**9) > window["window_minutes"]
+            ):
+                five = window
+
+    membership = None
+    user = payload.get("user")
+    if isinstance(user, dict) and isinstance(user.get("membership"), dict):
+        membership = user["membership"].get("level")
+
+    return {"five_hour": five, "weekly": weekly, "membership": membership}
+
+
+def fetch_kimi_api_snapshot() -> dict[str, Any]:
+    token = _kimi_read_token()
+    if not token:
+        raise RuntimeError("No kimi-code credentials. Run `kimi` to sign in.")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "usage-hud/1.0",
+    }
+    req = urllib.request.Request(KIMI_USAGE_URL, method="GET", headers=headers)
+    with urllib.request.urlopen(req, timeout=30) as response:
+        body = response.read()
+    payload = json.loads(body.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError("Kimi usage API returned unexpected payload.")
+    return normalize_kimi_payload(payload)
+
+
+# kimi-code refreshes its OAuth token roughly every 15 minutes; if the token is
+# stale (user hasn't run kimi lately) the call 401s and we keep any prior
+# reading, mirroring the Claude cache's stale handling.
+_kimi_cache: dict[str, Any] = {
+    "snapshot": None,
+    "status": "Initializing",
+    "fetched_at": 0.0,
+    "backoff": 0.0,
+    "last_attempt": 0.0,
+}
+KIMI_CACHE_TTL = 60.0
+KIMI_BACKOFF_INITIAL = 120.0
+KIMI_BACKOFF_MAX = 900.0
+
+
+def fetch_kimi_cached() -> tuple[dict[str, Any] | None, str]:
+    """Return (snapshot, status) using a TTL cache with exponential backoff."""
+
+    now = time.monotonic()
+
+    if _kimi_cache["snapshot"] is not None:
+        if now - _kimi_cache["fetched_at"] < KIMI_CACHE_TTL:
+            return _kimi_cache["snapshot"], _kimi_cache["status"]
+
+    if _kimi_cache["backoff"] > 0:
+        if now - _kimi_cache["last_attempt"] < _kimi_cache["backoff"]:
+            snapshot = _kimi_cache["snapshot"]
+            return snapshot, (_kimi_cache["status"] if snapshot else "Retrying soon…")
+
+    _kimi_cache["last_attempt"] = now
+    try:
+        snapshot = fetch_kimi_api_snapshot()
+        _kimi_cache["snapshot"] = snapshot
+        _kimi_cache["status"] = "Live usage"
+        _kimi_cache["fetched_at"] = now
+        _kimi_cache["backoff"] = 0.0
+        return snapshot, "Live usage"
+    except urllib.error.HTTPError as exc:
+        status = f"Kimi API HTTP {exc.code}"
+    except urllib.error.URLError:
+        status = "Network error reaching Kimi usage API"
+    except Exception as exc:  # noqa: BLE001
+        status = str(exc)
+
+    prev = _kimi_cache["backoff"]
+    _kimi_cache["backoff"] = min(
+        KIMI_BACKOFF_MAX, KIMI_BACKOFF_INITIAL if prev == 0 else prev * 2
+    )
+    if _kimi_cache["snapshot"] is not None:
+        return _kimi_cache["snapshot"], _kimi_cache["status"] + " (stale)"
+    _kimi_cache["status"] = status
+    return None, status
+
+
+def build_kimi_provider_section(
+    snapshot: dict[str, Any] | None,
+    status_line: str,
+) -> ProviderSection:
+    """Build the Kimi section: S (short 5h window) and W (weekly), like Claude."""
+
+    stale = status_line.endswith("(stale)")
+    rows: list[MetricRow] = []
+    notes: list[NoteLine] = []
+
+    if not snapshot:
+        notes.append(build_note_line(status_line, "yellow"))
+        return build_section_model(
+            provider="kimi",
+            title=_provider_title("kimi"),
+            status=status_line,
+            notes=tuple(notes),
+            stale=stale,
+            accent=_provider_accent("kimi"),
+        )
+
+    now_local = datetime.now().astimezone()
+    five = snapshot.get("five_hour") or {}
+    weekly = snapshot.get("weekly") or {}
+
+    five_pct = five.get("utilization")
+    weekly_pct = weekly.get("utilization")
+    five_minutes = five.get("window_minutes") or 300
+    five_expected = (
+        expected_pct_from_iso_reset(
+            five.get("resets_at"), timedelta(minutes=five_minutes), now_local
+        )
+        if five_pct is not None
+        else None
+    )
+    weekly_expected = (
+        expected_pct_from_iso_reset(weekly.get("resets_at"), KIMI_WEEKLY_WINDOW, now_local)
+        if weekly_pct is not None
+        else None
+    )
+
+    rows.append(
+        _build_metric_row_model(
+            label="S",
+            pct=five_pct,
+            expected=five_expected,
+            burn_key=("kimi", "S"),
+            stale=stale,
+            record_burn=True,
+        )
+    )
+    rows.append(
+        _build_metric_row_model(
+            label="W",
+            pct=weekly_pct,
+            expected=weekly_expected,
+            burn_key=("kimi", "W"),
+            stale=stale,
+            record_burn=True,
+        )
+    )
+
+    if status_line != "Live usage":
+        notes.append(build_note_line(status_line, "orange" if stale else "yellow"))
+
+    return build_section_model(
+        provider="kimi",
+        title=_provider_title("kimi"),
+        status=status_line,
+        rows=tuple(rows),
+        notes=tuple(notes),
+        stale=stale,
+        accent=_provider_accent("kimi"),
+    )
+
+
 # Threshold (GB) below which a swap gauge is worth a row. Idle Macs report a
 # swap file that is allocated but essentially unused; showing a 0% swap gauge
 # is noise, so we only surface swap once it is actually in play.
@@ -1809,6 +2058,8 @@ def build_provider_sections(
     critical: int,
     all_limits: bool,
     show_badges: bool,
+    kimi_snapshot: dict[str, Any] | None = None,
+    kimi_status: str = "Disabled by --providers",
     system_snapshot: dict[str, Any] | None = None,
     system_status: str = "Disabled by --providers",
 ) -> list[list[str]]:
@@ -1824,6 +2075,8 @@ def build_provider_sections(
             codex_status=codex_status,
             gemini_status=gemini_status,
             all_limits=all_limits,
+            kimi_snapshot=kimi_snapshot,
+            kimi_status=kimi_status,
             system_snapshot=system_snapshot,
             system_status=system_status,
         )
@@ -1839,6 +2092,8 @@ def build_snapshot_bundle(
     claude_status: str,
     codex_status: str,
     gemini_status: str,
+    kimi_snapshot: dict[str, Any] | None = None,
+    kimi_status: str = "Disabled by --providers",
     system_snapshot: dict[str, Any] | None = None,
     system_status: str = "Disabled by --providers",
 ) -> SnapshotBundle:
@@ -1853,6 +2108,8 @@ def build_snapshot_bundle(
         claude_status=claude_status,
         codex_status=codex_status,
         gemini_status=gemini_status,
+        kimi_snapshot=kimi_snapshot,
+        kimi_status=kimi_status,
         system_snapshot=system_snapshot,
         system_status=system_status,
     )
@@ -1868,6 +2125,8 @@ def build_provider_section_models(
     codex_status: str,
     gemini_status: str,
     all_limits: bool,
+    kimi_snapshot: dict[str, Any] | None = None,
+    kimi_status: str = "Disabled by --providers",
     system_snapshot: dict[str, Any] | None = None,
     system_status: str = "Disabled by --providers",
 ) -> tuple[ProviderSection, ...]:
@@ -1880,6 +2139,9 @@ def build_provider_section_models(
         else None,
         "gemini": build_gemini_provider_section(gemini_snapshot, gemini_status)
         if "gemini" in selected_providers
+        else None,
+        "kimi": build_kimi_provider_section(kimi_snapshot, kimi_status)
+        if "kimi" in selected_providers
         else None,
         "system": build_system_provider_section(system_snapshot, system_status)
         if "system" in selected_providers
@@ -1903,10 +2165,12 @@ def fetch_provider_section_models(
         claude_snapshot,
         codex_snapshot,
         gemini_snapshot,
+        kimi_snapshot,
         system_snapshot,
         claude_status,
         codex_status,
         gemini_status,
+        kimi_status,
         system_status,
     ) = fetch_all_snapshots(
         selected_providers=selected_providers,
@@ -1922,6 +2186,8 @@ def fetch_provider_section_models(
         claude_status=claude_status,
         codex_status=codex_status,
         gemini_status=gemini_status,
+        kimi_snapshot=kimi_snapshot,
+        kimi_status=kimi_status,
         system_snapshot=system_snapshot,
         system_status=system_status,
     )
@@ -1934,6 +2200,8 @@ def fetch_provider_section_models(
         codex_status=codex_status,
         gemini_status=gemini_status,
         all_limits=all_limits,
+        kimi_snapshot=kimi_snapshot,
+        kimi_status=kimi_status,
         system_snapshot=system_snapshot,
         system_status=system_status,
     )
@@ -1951,6 +2219,8 @@ def render_full(
     warn: int,
     critical: int,
     all_limits: bool,
+    kimi_snapshot: dict[str, Any] | None = None,
+    kimi_status: str = "Disabled by --providers",
     system_snapshot: dict[str, Any] | None = None,
     system_status: str = "Disabled by --providers",
 ) -> str:
@@ -1969,6 +2239,8 @@ def render_full(
         critical=critical,
         all_limits=all_limits,
         show_badges=show_badges,
+        kimi_snapshot=kimi_snapshot,
+        kimi_status=kimi_status,
         system_snapshot=system_snapshot,
         system_status=system_status,
     )
@@ -1993,6 +2265,8 @@ def render_mini(
     warn: int,
     critical: int,
     all_limits: bool,
+    kimi_snapshot: dict[str, Any] | None = None,
+    kimi_status: str = "Disabled by --providers",
     system_snapshot: dict[str, Any] | None = None,
     system_status: str = "Disabled by --providers",
 ) -> str:
@@ -2010,6 +2284,8 @@ def render_mini(
         critical=critical,
         all_limits=all_limits,
         show_badges=show_badges,
+        kimi_snapshot=kimi_snapshot,
+        kimi_status=kimi_status,
         system_snapshot=system_snapshot,
         system_status=system_status,
     )
@@ -2094,6 +2370,8 @@ def fetch_all_snapshots(
     dict[str, Any] | None,
     dict[str, Any] | None,
     dict[str, Any] | None,
+    dict[str, Any] | None,
+    str,
     str,
     str,
     str,
@@ -2102,10 +2380,12 @@ def fetch_all_snapshots(
     claude_snapshot: dict[str, Any] | None = None
     codex_snapshot: dict[str, Any] | None = None
     gemini_snapshot: dict[str, Any] | None = None
+    kimi_snapshot: dict[str, Any] | None = None
     system_snapshot: dict[str, Any] | None = None
     claude_status = "Disabled by --providers"
     codex_status = "Disabled by --providers"
     gemini_status = "Disabled by --providers"
+    kimi_status = "Disabled by --providers"
     system_status = "Disabled by --providers"
 
     if "claude" in selected_providers:
@@ -2122,6 +2402,9 @@ def fetch_all_snapshots(
     if "gemini" in selected_providers:
         gemini_snapshot, gemini_status = fetch_gemini_cached()
 
+    if "kimi" in selected_providers:
+        kimi_snapshot, kimi_status = fetch_kimi_cached()
+
     if "system" in selected_providers:
         try:
             system_snapshot = fetch_system_snapshot(disk_path, remote=system_remote)
@@ -2137,10 +2420,12 @@ def fetch_all_snapshots(
         claude_snapshot,
         codex_snapshot,
         gemini_snapshot,
+        kimi_snapshot,
         system_snapshot,
         claude_status,
         codex_status,
         gemini_status,
+        kimi_status,
         system_status,
     )
 
@@ -2157,6 +2442,8 @@ def render_output(
     claude_status: str,
     codex_status: str,
     gemini_status: str,
+    kimi_snapshot: dict[str, Any] | None = None,
+    kimi_status: str = "Disabled by --providers",
     system_snapshot: dict[str, Any] | None = None,
     system_status: str = "Disabled by --providers",
 ) -> str:
@@ -2172,6 +2459,8 @@ def render_output(
             warn=warn,
             critical=critical,
             all_limits=all_limits,
+            kimi_snapshot=kimi_snapshot,
+            kimi_status=kimi_status,
             system_snapshot=system_snapshot,
             system_status=system_status,
         )
@@ -2187,6 +2476,8 @@ def render_output(
         warn=warn,
         critical=critical,
         all_limits=all_limits,
+        kimi_snapshot=kimi_snapshot,
+        kimi_status=kimi_status,
         system_snapshot=system_snapshot,
         system_status=system_status,
     )
@@ -2257,10 +2548,12 @@ def run_topmost_window(args: argparse.Namespace, selected_providers: set[str]) -
             claude_snapshot,
             codex_snapshot,
             gemini_snapshot,
+            kimi_snapshot,
             system_snapshot,
             claude_status,
             codex_status,
             gemini_status,
+            kimi_status,
             system_status,
         ) = fetch_all_snapshots(
             selected_providers=selected_providers,
@@ -2281,6 +2574,8 @@ def run_topmost_window(args: argparse.Namespace, selected_providers: set[str]) -
             claude_status=claude_status,
             codex_status=codex_status,
             gemini_status=gemini_status,
+            kimi_snapshot=kimi_snapshot,
+            kimi_status=kimi_status,
             system_snapshot=system_snapshot,
             system_status=system_status,
         )
@@ -2597,10 +2892,12 @@ def main() -> int:
                     claude_snapshot,
                     codex_snapshot,
                     gemini_snapshot,
+                    kimi_snapshot,
                     system_snapshot,
                     claude_status,
                     codex_status,
                     gemini_status,
+                    kimi_status,
                     system_status,
                 ) = fetch_all_snapshots(
                     selected_providers=selected_providers,
@@ -2624,6 +2921,10 @@ def main() -> int:
                             "status": gemini_status,
                             "snapshot": gemini_snapshot,
                         },
+                        "kimi": {
+                            "status": kimi_status,
+                            "snapshot": kimi_snapshot,
+                        },
                         "system": {
                             "status": system_status,
                             "snapshot": system_snapshot,
@@ -2646,6 +2947,8 @@ def main() -> int:
                             claude_status=claude_status,
                             codex_status=codex_status,
                             gemini_status=gemini_status,
+                            kimi_snapshot=kimi_snapshot,
+                            kimi_status=kimi_status,
                             system_snapshot=system_snapshot,
                             system_status=system_status,
                         )

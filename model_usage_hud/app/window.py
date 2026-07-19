@@ -47,11 +47,18 @@ MUTE_PATHS: dict[ProviderName, Path] = {
     "claude": Path.home() / ".claude" / "mute",
     "codex": Path.home() / ".codex" / "mute",
 }
-PROVIDER_ORDER: tuple[ProviderName, ...] = ("claude", "codex", "gemini", "system")
+PROVIDER_ORDER: tuple[ProviderName, ...] = (
+    "claude",
+    "codex",
+    "gemini",
+    "kimi",
+    "system",
+)
 PROVIDER_LABELS: dict[ProviderName, str] = {
     "claude": "Claude",
     "codex": "Codex",
     "gemini": "Gemini",
+    "kimi": "Kimi",
     "system": "System",
 }
 

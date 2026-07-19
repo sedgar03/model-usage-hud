@@ -14,7 +14,13 @@ from .models import (
     TextStyle,
 )
 
-ORDERED_PROVIDERS: tuple[ProviderName, ...] = ("claude", "codex", "gemini", "system")
+ORDERED_PROVIDERS: tuple[ProviderName, ...] = (
+    "claude",
+    "codex",
+    "gemini",
+    "kimi",
+    "system",
+)
 
 
 def pace_bar_runs(

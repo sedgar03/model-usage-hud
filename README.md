@@ -9,6 +9,7 @@ Unified HUD for monitoring usage and tracking progress toward limits across all 
 - Claude Code
 - OpenAI Codex
 - Gemini
+- Kimi (Moonshot, via the `kimi-code` CLI)
 
 Plus a **System** provider that gauges the local machine (CPU, memory, memory
 pressure, swap, disk) so you can see at a glance when a box you use as a server
@@ -168,7 +169,7 @@ Notable options:
 - `--interval 15` refresh every 15 seconds
 - `--no-alt-screen` keep scrollback
 - `--all-limits` show all Codex limit buckets
-- `--providers codex,gemini` show only selected providers (`claude`, `codex`, `gemini`, `system`; default: all)
+- `--providers codex,gemini` show only selected providers (`claude`, `codex`, `gemini`, `kimi`, `system`; default: all)
 - `--disk-path /Volumes/Data` filesystem the System provider gauges for free space (default: `/`)
 - `--serve` run the tailnet metrics + budget server instead of the HUD (see also `usage-hud-serve`)
 - `--serve-host 0.0.0.0` / `--serve-port 8787` bind address/port for `--serve`
@@ -303,6 +304,7 @@ local model, and cap its memory at `suggested_mem_gb`.
 
 - Claude usage is fetched from Anthropic OAuth usage API using your macOS Keychain `Claude Code-credentials` item.
 - If Claude credentials are missing, the HUD still shows Codex data.
+- Kimi usage is fetched from `https://api.kimi.com/coding/v1/usages` using the OAuth token `kimi-code` maintains in `~/.kimi-code/credentials/kimi-code.json`. Rows are `S` (the short ~5h window) and `W` (the weekly quota). The token is refreshed by `kimi-code` itself; if it has gone stale (you haven't run `kimi` recently) the HUD shows the last reading marked `(stale)` until it refreshes.
 - Gemini request usage is estimated from local Gemini CLI session logs by counting Gemini responses as requests and comparing against request limits (Pro vs Non-Pro/Flash models).
 - Gemini token totals are still included in `--json` output for reference (`pro.used_tokens`, `non_pro.used_tokens`, and per-model totals).
 - Gemini defaults (`50/24h P`, `1500/24h N`) match common quotas as of February 27, 2026; override with `--gemini-pro-limit-requests` and `--gemini-non-pro-limit-requests` if your account limits differ.
